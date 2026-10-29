@@ -29,7 +29,15 @@ def _download(client, job):
 def test_pdf_to_word_produces_editable_document(client):
     from docx import Document
 
-    job = _completed(client, upload(client, "pdf-to-word", [("report.pdf", make_pdf())]))
+    job = _completed(
+        client,
+        upload(
+            client,
+            "pdf-to-word",
+            [("report.pdf", make_pdf())],
+            options={"mode": "editable"},
+        ),
+    )
     content = _download(client, job)
     document = Document(io.BytesIO(content))
     text = "\n".join(paragraph.text for paragraph in document.paragraphs)

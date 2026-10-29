@@ -22,14 +22,22 @@ class ConversionJob(Base):
     input_format: Mapped[str] = mapped_column(String(16), nullable=False)
     output_format: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
+    # Fine-grained progress stage, e.g. queued -> converting -> packaging.
+    stage: Mapped[str | None] = mapped_column(String(32), nullable=True, default="queued")
     file_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     output_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     output_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     output_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Batch conversion fields
+    zip_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    zip_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    batch_results_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     options_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     warnings_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pages_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

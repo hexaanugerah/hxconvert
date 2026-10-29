@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import importlib.metadata
 import importlib.util
 import os
 from pathlib import Path
@@ -41,9 +42,56 @@ def find_soffice() -> str | None:
     return None
 
 
+def find_winword() -> str | None:
+    if not sys.platform.startswith("win"):
+        return None
+    candidates: list[str] = []
+    if settings.word_path:
+        candidates.append(settings.word_path)
+    found = shutil.which("WINWORD.EXE") or shutil.which("winword")
+    if found:
+        candidates.append(found)
+    try:
+        import winreg
+
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(
+                    root,
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WINWORD.EXE",
+                ) as key:
+                    candidates.append(str(winreg.QueryValueEx(key, "")[0]))
+            except OSError:
+                continue
+    except Exception:  # pragma: no cover - non-Windows
+        pass
+    for base in (
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+    ):
+        for version in ("Office16", "Office15", "Office14"):
+            candidates.append(str(Path(base) / "Microsoft Office" / "root" / version / "WINWORD.EXE"))
+            candidates.append(str(Path(base) / "Microsoft Office" / version / "WINWORD.EXE"))
+
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return None
+
+
 @lru_cache
 def libreoffice_available() -> bool:
     return find_soffice() is not None
+
+
+@lru_cache
+def word_available() -> bool:
+    """True when Microsoft Word and the pywin32 COM bridge are usable."""
+    return (
+        sys.platform.startswith("win")
+        and find_winword() is not None
+        and importlib.util.find_spec("win32com") is not None
+    )
 
 
 def _find_tesseract() -> str | None:
@@ -91,6 +139,12 @@ def ocr_available() -> bool:
 @lru_cache
 def library_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
+    distribution_names = {
+        "fitz": "PyMuPDF",
+        "docx": "python-docx",
+        "PIL": "Pillow",
+        "pptx": "python-pptx",
+    }
     for module_name, label in (
         ("fitz", "PyMuPDF"),
         ("pdfplumber", "pdfplumber"),
@@ -98,10 +152,20 @@ def library_versions() -> dict[str, str]:
         ("openpyxl", "openpyxl"),
         ("pptx", "python-pptx"),
         ("PIL", "Pillow"),
+        ("pdf2docx", "pdf2docx"),
     ):
         try:
             module = importlib.import_module(module_name)
-            versions[label] = getattr(module, "__version__", None) or getattr(module, "VersionBind", "unknown")
+            version = getattr(module, "__version__", None) or getattr(module, "VersionBind", None)
+            if not version:
+                # Several packages (pdf2docx, PyMuPDF's fitz shim) expose no
+                # __version__, so fall back to the installed distribution metadata.
+                distribution = distribution_names.get(module_name, module_name)
+                try:
+                    version = importlib.metadata.version(distribution)
+                except importlib.metadata.PackageNotFoundError:
+                    version = "unknown"
+            versions[label] = str(version)
         except Exception:  # pragma: no cover
             versions[label] = "unavailable"
     return versions
@@ -114,6 +178,11 @@ def capabilities_snapshot() -> dict:
             "available": libreoffice_available(),
             "path": find_soffice(),
             "used_for": ["docx/xlsx/pptx -> PDF (high fidelity)", "pptx -> images"],
+        },
+        "microsoft_word": {
+            "available": word_available(),
+            "path": find_winword(),
+            "used_for": ["docx -> PDF (highest fidelity, reference renderer)"],
         },
         "ocr": {
             "available": engine is not None,

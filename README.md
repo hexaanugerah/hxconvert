@@ -18,24 +18,29 @@ tidak tersedia ditandai **tidak tersedia** beserta alasannya.
 | Frontend Next.js 15 (App Router) | Selesai: landing, alat, konverter, dashboard, riwayat, pengaturan, login/daftar, privasi |
 | Backend FastAPI | Selesai: auth JWT + cookie, pekerjaan konversi, unduhan, pembersihan otomatis |
 | Database | SQLite (default) / PostgreSQL, model + migrasi Alembic |
-| PDF → Word | Selesai, dengan ekstraksi teks/heading/daftar/tabel/gambar dan OCR untuk halaman pindai |
+| PDF → Word | Selesai, dua mode: **prioritaskan tata letak** (`pdf2docx`, gambar raster/JPEG2000/vektor dipertahankan) dan **prioritaskan pengeditan** (paragraf, tabel, gambar sebaris, OCR) |
+| Ukuran & orientasi halaman | Dipertahankan per halaman: PDF → Word memakai section terpisah untuk ukuran campuran; Word → PDF membaca page setup; gambar → PDF menjaga rasio |
+| Pratinjau multi-halaman | Semua halaman PDF/gambar dirender; API menyediakan URL pratinjau nyata per halaman |
 | PDF → Excel / PowerPoint / gambar | Selesai |
 | Alat PDF lain | Merge, split, rotate, compress, ekstrak teks, ekstrak tabel, nomor halaman, watermark, hapus halaman, urutkan halaman |
 | Word | DOCX → PDF/TXT/HTML/Markdown, TXT/Markdown → DOCX, merge, rapikan format |
+| Word → PDF | **Microsoft Word Automation** sebagai renderer referensi di Windows (pagination, font, header/footer, tabel, gambar); LibreOffice lalu HTML sebagai fallback dengan peringatan |
 | Excel | XLSX → PDF/CSV/HTML, CSV → XLSX |
 | PowerPoint | PPTX → PDF/gambar **(memerlukan LibreOffice)** |
 | Gambar & OCR | Konversi JPG/PNG/WebP, gambar → PDF, OCR gambar, PDF pindai → DOCX |
 | Keamanan berkas | Validasi isi (magic bytes), nama acak, batas ukuran/jumlah, timeout, akses per pemilik, retensi |
-| Pengujian | 39 tes backend lulus (termasuk konversi nyata dan kontrol akses) |
-| Build frontend | `tsc --noEmit` dan `next build` lulus |
+| Pengujian | 78 tes backend lulus (termasuk fidelitas gambar/Word, multi-halaman, pratinjau, batch, alat PDF/gambar baru, konversi nyata, dan kontrol akses) |
+| Build frontend | `tsc --noEmit` dan `next build` (standalone) lulus |
+| Deployment | Docker Compose produksi (Postgres, nginx, certbot) + panduan di `DEPLOYMENT.md` |
 | Verifikasi UI | Konversi PDF→Word diuji melalui browser headless terhadap backend asli |
 
 ### Keterbatasan lingkungan saat ini
 
+- **Microsoft Word terpasang** di mesin pengembangan Windows, sehingga DOCX → PDF memakai Word Automation dan tata letaknya identik dengan Word. Di server tanpa Word (termasuk Docker Linux), backend otomatis memakai LibreOffice bila ada, lalu renderer HTML dengan peringatan.
 - **LibreOffice tidak terpasang** di mesin pengembangan ini. Akibatnya:
   - PPTX → PDF dan PPTX → gambar ditandai tidak tersedia (dan tidak akan muncul sebagai alat yang bisa dipakai).
-  - DOCX → PDF dan XLSX → PDF memakai renderer HTML fallback (rapi untuk teks/tabel, tetapi tidak identik dengan tata letak Word/Excel).
-  - Pasang LibreOffice lalu restart backend untuk hasil berfidelitas tinggi.
+  - XLSX → PDF memakai renderer HTML fallback (rapi untuk teks/tabel, tetapi tidak identik dengan tata letak Excel).
+  - Pasang LibreOffice lalu restart backend untuk alat PowerPoint dan hasil Excel yang lebih akurat.
 - OCR memakai **RapidOCR (ONNX)** karena Tesseract tidak terpasang. RapidOCR menangani aksara Latin dengan baik; bila Tesseract beserta data bahasa Indonesia tersedia, backend otomatis memilih Tesseract.
 - Antrean pekerjaan berjalan **in-process** (thread + status polling). Cocok untuk satu node. Untuk skala horizontal, ganti `app/workers/runner.py` dengan Celery/RQ tanpa mengubah kontrak API.
 - Penyimpanan objek S3 **belum diimplementasikan**; penyimpanan lokal adalah satu-satunya backend penyimpanan.
@@ -64,10 +69,10 @@ convert/  (root proyek)
 │   │   ├── models/            User, ConversionJob, ConversionLog
 │   │   ├── schemas/           Validasi/response Pydantic
 │   │   ├── repositories/      Akses database
-│   │   ├── services/          Mesin konversi (pdf_*, docx_ops, excel_ops, pptx_ops, image_ops, ocr)
+│   │   ├── services/          Mesin konversi (pdf_*, docx_ops, word_com, excel_ops, pptx_ops, image_ops, ocr)
 │   │   └── workers/           Eksekusi pekerjaan + pembersih kedaluwarsa
 │   ├── alembic/               Migrasi database
-│   ├── tests/                 39 tes integrasi + unit melalui HTTP
+│   ├── tests/                 78 tes integrasi + unit melalui HTTP
 │   ├── requirements.txt
 │   └── .env.example
 ├── storage/                   inputs/, outputs/, tmp/ (berkas dokumen — tidak di-commit)
@@ -84,7 +89,8 @@ convert/  (root proyek)
 4. Pekerjaan berjalan di background thread dengan timeout; status `queued → processing → completed|failed`.
 5. Frontend mem-polling status setiap 1,5 detik (tidak ada persentase palsu).
 6. Hasil dipindahkan ke `storage/outputs/{job_id}/`, tersedia lewat endpoint unduhan yang memeriksa kepemilikan dan masa berlaku.
-7. Berkas masukan dihapus setelah selesai; hasil dihapus oleh pembersih terjadwal saat kedaluwarsa.
+7. Backend memeriksa halaman hasil/sumber dan merender satu PNG pratinjau per halaman (dibatasi `PREVIEW_MAX_PAGES`). Metadata ukuran, orientasi, dan status per halaman disimpan pada pekerjaan; URL pratinjau hanya dibuat untuk berkas yang benar-benar ada.
+8. Berkas masukan dihapus setelah selesai; hasil dan pratinjau dihapus oleh pembersih terjadwal saat kedaluwarsa.
 
 ---
 
@@ -94,7 +100,8 @@ convert/  (root proyek)
 - **Python 3.11+** (diuji dengan 3.11.5)
 - **Node.js 18+** dan npm (diuji dengan Node 26)
 - Opsional:
-  - **LibreOffice** — untuk DOCX/XLSX/PPTX → PDF fidelitas tinggi dan render slide
+  - **Microsoft Word** (Windows) + `pywin32` — renderer DOCX → PDF paling akurat. `pywin32` dipasang otomatis dari requirements di Windows.
+  - **LibreOffice** — fallback DOCX/XLSX → PDF dan syarat alat PowerPoint
   - **Tesseract OCR + data bahasa** — alternatif OCR; RapidOCR sudah tercakup di requirements
 
 Tidak perlu Docker. Tidak perlu PostgreSQL untuk pengembangan (SQLite default).
@@ -113,7 +120,7 @@ Skrip akan:
 1. Memeriksa Python, Node.js, npm, dan port 8000/3000.
 2. Membuat `backend\.env` (dengan `SECRET_KEY` acak) dan `frontend\.env.local` bila belum ada.
 3. Membuat `.venv`, memasang dependensi Python, dan `npm install` bila diperlukan.
-4. Melaporkan status LibreOffice dan OCR (tidak menghentikan aplikasi bila tidak ada).
+4. Melaporkan status Microsoft Word, LibreOffice, dan OCR (tidak menghentikan aplikasi bila tidak ada).
 5. Menjalankan `alembic upgrade head`.
 6. Membuka backend di `http://127.0.0.1:8000` dan frontend di `http://127.0.0.1:3000`.
 
@@ -163,6 +170,9 @@ Salin dari `backend/.env.example`. Variabel penting:
 | `RESULT_TTL_HOURS` | `24` | Masa simpan hasil sebelum dihapus. |
 | `CLEANUP_INTERVAL_MINUTES` | `15` | Interval pembersih berkas kedaluwarsa. |
 | `CONVERSION_TIMEOUT_SECONDS` | `180` | Batas waktu eksekusi konversi. |
+| `PREVIEW_DPI` | `96` | DPI pratinjau halaman (terpisah dari kualitas unduhan). |
+| `PREVIEW_MAX_WIDTH` | `1400` | Lebar maksimum gambar pratinjau dalam piksel. |
+| `PREVIEW_MAX_PAGES` | `60` | Jumlah halaman maksimum yang dirender menjadi pratinjau per pekerjaan; halaman lain berstatus `pending`. |
 | `ALLOW_ANONYMOUS` | `true` | Izinkan konversi tanpa akun. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Batas permintaan per IP (in-memory, per proses). |
 | `CORS_ORIGINS` | localhost:3000/3001 | Origin frontend yang diizinkan. |
@@ -213,10 +223,46 @@ UI atau `GET /api/v1/formats`. Ringkasannya:
 - Selalu menghasilkan DOCX yang dapat diedit — bukan satu gambar per halaman.
 - Peringatan hasil (OCR, kolom, tabel kompleks, batas halaman) dikirim ke UI.
 
-**Word/Excel → PDF tanpa LibreOffice**: DOCX dikonversi ke HTML (mammoth) atau
-XLSX ke tabel HTML, lalu dirender dengan xhtml2pdf. Hasilnya PDF nyata, tetapi
-font, page break, kolom, chart, gambar Excel, dan merge cell dapat berbeda.
-Peringatan ditampilkan. Dengan LibreOffice, konversi memakai `soffice --headless`.
+**PDF → Word: gambar dan mode**
+- Mode `layout` memakai `pdf2docx`, sehingga gambar raster, JPEG2000/CMYK, gambar
+  transparan, gambar berulang, grafik vektor, dan gambar di dalam tabel tetap tampil
+  dan teks tetap dapat diedit. Mode `editable` menyalin gambar sebagai objek sebaris
+  dan menormalkan JPX/CMYK/transparansi ke PNG lewat Pillow + PyMuPDF.
+- Halaman tanpa lapisan teks dideteksi terpisah. Mode `layout` untuk PDF pindai
+  otomatis dialihkan ke mode edit + OCR; gambar halaman tidak diduplikasi dengan
+  teks OCR. Semua gambar yang tidak dapat disalin dilaporkan di `warnings`.
+
+**Word → PDF: renderer referensi**
+- Di Windows, DOCX diekspor lewat Microsoft Word Automation di proses terpisah
+  (`word_com_helper`) dengan timeout, tanpa `shell=True`, dan Word ditutup setelah
+  selesai. Hasilnya mempertahankan page setup, font, header/footer, tabel, gambar,
+  dan objek mengambang seperti dokumen aslinya.
+- Font yang dipakai DOCX diperiksa terhadap font sistem. Font yang tidak tersedia
+  dilaporkan di `warnings` karena Word akan menggantinya dan panjang baris dapat berubah.
+- Bila Word gagal/tidak ada, backend memakai LibreOffice headless dengan profil
+  pengguna terpisah per pekerjaan; renderer HTML hanya dipakai sebagai pilihan terakhir.
+
+**Ukuran halaman**
+- PDF → Word mendeteksi ukuran dan orientasi setiap halaman. Jika ukuran berubah,
+  dibuat section Word baru sehingga A4, Letter, F4, A3, lanskap, dan ukuran khusus
+  tetap dipertahankan. Margin didekati dari kotak konten, dan gambar diskalakan
+  proporsional agar tidak melebihi lebar teks.
+- Word → PDF dengan Word atau LibreOffice mempertahankan page setup asli. Pada
+  fallback HTML, renderer membaca ukuran kertas, orientasi, dan margin dari section
+  DOCX dan menerapkannya sebagai `@page`; perbedaan antar-section dilaporkan.
+- Gambar → PDF menawarkan ukuran otomatis (mengikuti gambar), A4/Letter/Legal/A3/F4,
+  serta mode sesuaikan/isi/ukuran asli. Rasio aspek tidak pernah diubah; mode isi
+  halaman memotong tepi secara proporsional dan memberi peringatan.
+- Excel → PDF (fallback) membaca orientasi/paper size dari XML lembar kerja dan
+  membagi kolom lebar menjadi blok halaman, bukan memotong sisi kanan.
+- PDF → PowerPoint menskalakan setiap halaman secara proporsional ke slide sehingga
+  halaman dengan ukuran campuran tidak terpotong.
+
+**Excel → PDF tanpa LibreOffice**: XLSX dikonversi ke tabel HTML lalu dirender
+dengan xhtml2pdf. Hasilnya PDF nyata, tetapi font, page break, kolom, chart,
+gambar Excel, dan merge cell dapat berbeda; peringatan ditampilkan. DOCX → PDF
+memakai Word di Windows, LibreOffice bila tersedia, dan HTML hanya sebagai
+pilihan terakhir.
 
 **PDF → Excel** memakai pdfplumber. Bila tidak ada tabel bergaris, baris teks
 diekspor sebagai fallback (dapat dimatikan lewat opsi).
@@ -255,6 +301,15 @@ Mencakup:
 - Gambar → PDF, konversi JPG, OCR gambar, PDF pindai → Word (OCR).
 - Merge/split PDF, rotate, nomor halaman, watermark, kompres, hapus/urutkan halaman, ekstrak teks/tabel.
 - Berkas kosong/rusak, ekstensi tidak didukung, isi tidak cocok dengan ekstensi, ukuran melebihi batas.
+- PDF 1/8/12 halaman: jumlah halaman, urutan 1..N, dan pratinjau yang dapat diakses; isi semua halaman masuk ke DOCX.
+- Delapan gambar sekaligus (nama berkas sama, dimensi/orientasi berbeda): urutan, rasio aspek, nama tidak tertimpa.
+- PDF ukuran halaman campuran → Word: jumlah section dan ukuran tiap section.
+- Gambar → PDF untuk A4/Letter/Legal/A3/F4: ukuran halaman dan rasio konten.
+- Word → PDF mempertahankan ukuran/orientasi kertas dan tidak menambah halaman kosong.
+- Excel → PDF lanskap memuat semua kolom (tidak terpotong di kanan).
+- PDF pindai (dengan/tanpa OCR), PDF rusak, berkas besar (>3 MB), satu halaman gagal dirender
+  (status `failed` dilaporkan tanpa menggagalkan pekerjaan), gambar rusak di antara gambar valid.
+- Pratinjau hanya dapat diakses pemilik dan menjadi 410 setelah kedaluwarsa.
 - Pekerjaan gagal dilaporkan dengan pesan, unduhan kedaluwarsa (410), penghapusan riwayat.
 - Frontend: `npm run typecheck` dan `npm run build`.
 - Verifikasi manual UI: konversi PDF→Word dijalankan melalui browser headless, termasuk pratinjau PDF.js dan tombol unduh.
@@ -265,8 +320,18 @@ Tes OCR otomatis di-skip bila tidak ada mesin OCR.
 
 ## Build produksi
 
+Deploy VPS satu perintah (Docker, nginx, Let's Encrypt):
+
+```bash
+cp .env.production.template .env.production   # isi semua nilai
+./deploy.sh production
+```
+
+Detail lengkap ada di `DEPLOYMENT.md`. Untuk menjalankan manual tanpa Docker:
+
 ```powershell
 cd frontend
+$env:NEXT_PUBLIC_API_URL="https://domain-anda.com"   # origin saja, tanpa /api/v1; di-inline saat build
 npm run build
 npm start          # atau deploy ke hosting Next.js
 
@@ -294,8 +359,11 @@ Catatan produksi:
 | UI: "Backend tidak dapat dihubungi" | Backend belum jalan, URL API salah, atau CORS. Cek `http://127.0.0.1:8000/api/v1/health` dan `CORS_ORIGINS`. |
 | Alat PowerPoint tidak tersedia | LibreOffice tidak terdeteksi. Pasang LibreOffice, restart backend. |
 | Alat OCR tidak tersedia | Tidak ada Tesseract/RapidOCR. Jalankan `pip install rapidocr-onnxruntime` di venv backend. |
-| DOCX/XLSX → PDF tampak sederhana | LibreOffice tidak ada; backend memakai renderer HTML dan menampilkan peringatan. |
+| DOCX → PDF berbeda dari Word | Periksa `capabilities.microsoft_word.available` di `/health`. Tanpa Word/LibreOffice, backend memakai renderer HTML dan menampilkan peringatan. |
+| XLSX → PDF tampak sederhana | LibreOffice tidak ada; backend memakai renderer HTML dan menampilkan peringatan. |
+| Font berubah di PDF | Font tidak terpasang di server; `warnings` menyebutkan font yang diganti. Pasang font berlisensi secara sah atau gunakan font yang tersedia. |
 | PDF → Word kehilangan tata letak | PDF dengan kolom kompleks/rumus/tabel bergabung memang terbatas; lihat peringatan hasil. |
+| Pratinjau halaman tidak muncul | Halaman melewati `PREVIEW_MAX_PAGES`, pratinjau gagal dirender (lihat status/`error` per halaman), atau hasil sudah kedaluwarsa. |
 | `alembic` gagal | Periksa `DATABASE_URL`; hapus DB kosong yang korup hanya saat pengembangan. |
 | Port 3000 dipakai | Next.js memilih 3001; pastikan origin 3001 ada di `CORS_ORIGINS`. |
 | `ModuleNotFoundError` saat tes | Jalankan tes dengan Python dari `.venv`, bukan Python global. |
@@ -309,5 +377,6 @@ Lihat [`docs/API.md`](docs/API.md) atau Swagger di `/docs`.
 ## Lisensi
 
 Kode proyek ini disediakan untuk penggunaan Anda. Pustaka pihak ketiga mengikuti
-lisensi masing-masing (PyMuPDF AGPL/komersial, LibreOffice MPL, Tesseract Apache 2.0,
-RapidOCR Apache 2.0, dan lainnya). Tinjau lisensi sebelum distribusi komersial.
+lisensi masing-masing (PyMuPDF AGPL/komersial, pdf2docx MIT, LibreOffice MPL,
+Microsoft Word komersial, pywin32 PSF, Tesseract Apache 2.0, RapidOCR Apache 2.0,
+dan lainnya). Tinjau lisensi sebelum distribusi komersial.

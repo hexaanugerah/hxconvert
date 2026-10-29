@@ -30,13 +30,14 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _set_auth_cookie(response: Response, token: str) -> None:
+    is_production = settings.environment == "production"
     response.set_cookie(
         ACCESS_COOKIE,
         token,
         max_age=settings.access_token_expire_minutes * 60,
         httponly=True,
-        samesite="lax",
-        secure=settings.environment == "production",
+        samesite="lax" if is_production else "none",
+        secure=is_production,
         path="/",
     )
 

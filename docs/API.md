@@ -97,6 +97,11 @@ Endpoint pembuatan pekerjaan memakai `multipart/form-data`:
   "database": "ok",
   "capabilities": {
     "libreoffice": { "available": false, "path": null, "used_for": ["..."] },
+    "microsoft_word": {
+      "available": true,
+      "path": "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+      "used_for": ["docx -> PDF (highest fidelity, reference renderer)"]
+    },
     "ocr": { "available": true, "engine": "rapidocr", "languages": ["eng", "ind"] },
     "libraries": { "PyMuPDF": "1.28.2", "pdfplumber": "0.11.9" },
     "limits": { "max_upload_mb": 25, "max_files_per_job": 10, "result_ttl_hours": 24 }
@@ -132,6 +137,20 @@ Mengembalikan:
       "processing_note": "Tata letak kompleks ...",
       "options": [
         {
+          "name": "mode",
+          "label": "Mode konversi",
+          "type": "select",
+          "default": "layout",
+          "choices": [
+            { "value": "layout", "label": "Prioritaskan tata letak" },
+            { "value": "editable", "label": "Prioritaskan pengeditan" }
+          ],
+          "help": null,
+          "placeholder": null,
+          "min": null,
+          "max": null
+        },
+        {
           "name": "ocr",
           "label": "Deteksi hasil pindai (OCR)",
           "type": "select",
@@ -141,7 +160,7 @@ Mengembalikan:
             { "value": "always", "label": "Selalu gunakan OCR" },
             { "value": "never", "label": "Jangan gunakan OCR" }
           ],
-          "help": null,
+          "help": "Mode otomatis menggunakan OCR hanya untuk halaman tanpa teks.",
           "placeholder": null,
           "min": null,
           "max": null
@@ -253,7 +272,7 @@ Membuat pekerjaan. Rate-limited.
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/conversions \
   -F "tool=pdf-to-word" \
-  -F 'options={"ocr":"auto","language":"eng"}' \
+  -F 'options={"mode":"layout","ocr":"auto","language":"eng"}' \
   -F "files=@report.pdf"
 ```
 
@@ -272,16 +291,61 @@ Respons `202 Accepted` (status awal `queued`; pemrosesan berjalan setelah respon
   "output_size": null,
   "error_message": null,
   "warnings": [],
-  "options": { "ocr": "auto", "language": "eng", "page_breaks": false, "tables": true },
+  "options": { "mode": "layout", "ocr": "auto", "language": "eng", "page_breaks": false, "tables": true },
   "created_at": "2026-10-22T12:59:55",
   "started_at": null,
   "completed_at": null,
   "expires_at": "2026-10-23T12:59:55",
-  "download_url": null
+  "download_url": null,
+  "page_count": null,
+  "pages": []
 }
 ```
 
+Setelah pekerjaan selesai, `page_count` dan `pages` berisi hasil pemeriksaan nyata.
+Contoh PDF 8 halaman:
+
+```json
+{
+  "page_count": 8,
+  "pages": [
+    {
+      "page_number": 1,
+      "status": "completed",
+      "preview_url": "/api/v1/conversions/<job_id>/pages/1/preview",
+      "width_pt": 595.0,
+      "height_pt": 842.0,
+      "orientation": "portrait",
+      "pixel_width": 793,
+      "pixel_height": 1123,
+      "dpi": 96.0
+    }
+  ]
+}
+```
+
+- Urutan `pages` selalu naik dari 1 sampai `page_count`.
+- `status` bernilai `completed` (pratinjau tersedia), `pending` (melewati
+  `PREVIEW_MAX_PAGES`), atau `failed` (disertai `error`).
+- `preview_url` bernilai `null` bila tidak ada berkas pratinjau yang benar-benar
+  tersedia. Tidak ada URL yang dibuat tanpa berkas.
+- Untuk keluaran yang tidak berhalaman (mis. DOCX → TXT), `page_count` bernilai
+  `null` dan `pages` kosong.
+
 Kemungkinan error: `413`, `415`, `422` (opsi/JSON atau jumlah berkas), `429`.
+
+#### Mode `pdf-to-word`
+
+| `mode` | Perilaku |
+|---|---|
+| `layout` (default) | Memakai `pdf2docx`: ukuran halaman, posisi teks, tabel, gambar raster, dan grafik vektor dipertahankan. Gambar JPEG2000/CMYK dinormalisasi. Teks tetap dapat diedit, tetapi posisinya berada dalam kotak mengambang. |
+| `editable` | Alur Word sebaris (heading, paragraf, tabel asli, gambar sebaris, section per ukuran halaman). Lebih mudah diedit, posisi visual tidak persis. |
+
+Jika mode `layout` diminta untuk PDF yang seluruhnya hasil pindai, backend otomatis memakai mode edit + OCR (bila OCR tersedia) dan mengirim peringatan. Peringatan pada `warnings` selalu menyebut gambar, font, atau halaman yang tidak dapat dipertahankan persis; tidak ada kehilangan yang disembunyikan.
+
+#### Word ke PDF
+
+`docx-to-pdf` memakai **Microsoft Word Automation** (`WINWORD.EXE` + `pywin32`) sebagai renderer referensi di Windows, sehingga pagination, font, header/footer, tabel, gambar, dan objek mengambang sama dengan Word. Bila Word tidak tersedia atau gagal, hasil dialihkan ke **LibreOffice headless**, lalu ke renderer HTML dengan peringatan. Font yang tidak terpasang dideteksi dan dilaporkan di `warnings` sebelum penggantian terjadi.
 
 ### `GET /api/v1/conversions`
 
@@ -336,6 +400,19 @@ Mengunduh hasil sebagai lampiran (`Content-Disposition`).
 - `410` — kedaluwarsa (berkas dihapus).
 - `422` — pekerjaan gagal (berisi pesan kegagalan).
 - `403` — hasil belum siap.
+
+### `GET /api/v1/conversions/{job_id}/pages/{page_number}/preview`
+
+Mengembalikan PNG pratinjau halaman yang benar-benar dirender saat pemrosesan.
+
+- `200` — `image/png`.
+- `404` — pekerjaan bukan milik pemanggil, nomor halaman tidak ada, atau halaman
+  tersebut tidak memiliki pratinjau (mis. melewati batas `PREVIEW_MAX_PAGES`).
+- `410` — hasil kedaluwarsa dan berkas sudah dihapus.
+
+Akses memakai aturan kepemilikan yang sama dengan unduhan. Pratinjau memakai DPI
+terpisah (`PREVIEW_DPI`, default 96) sehingga lebih ringan; berkas unduhan tetap
+mengikuti opsi kualitas konversi.
 
 ### `DELETE /api/v1/conversions/{job_id}`
 

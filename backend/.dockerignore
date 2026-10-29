@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+ENV/
+.env
+*.db
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+docuconvert.db
+storage/
+alembic/versions/__pycache__/
+backend/.venv/
+logs/
+*.log
+
+# Local test fixtures and scratch scripts (never ship these in the image)
+tests/
+*.pdf
+*.docx
+*.xlsx
+*.pptx
+*.png
+*_cookies.txt
+cookies.txt
+benchmark*.json
+benchmark*.log
+debug_*.py
+fix_*.py
+update_registry*.py
+test_scanned.*
+.env*
+!.env.example
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore

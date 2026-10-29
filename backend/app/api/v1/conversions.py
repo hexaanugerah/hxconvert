@@ -11,10 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_identity, owned_job
-from app.api.serializers import job_to_out
+from app.api.serializers import job_to_out, page_preview_file
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.errors import ExpiredError, ForbiddenError, ValidationAppError
+from app.core.errors import ExpiredError, ForbiddenError, NotFoundError, ValidationAppError
 from app.core.rate_limit import enforce_rate_limit
 from app.core.security import get_optional_user
 from app.core.storage import OUTPUT_DIR, ensure_within, remove_job_files
@@ -49,9 +49,9 @@ def _parse_options(raw: str | None) -> dict:
     try:
         data = json.loads(raw)
     except ValueError:
-        raise ValidationAppError("The conversion options must be valid JSON.")
+        raise ValidationAppError("Opsi konversi harus berupa JSON yang valid.")
     if not isinstance(data, dict):
-        raise ValidationAppError("The conversion options must be a JSON object.")
+        raise ValidationAppError("Opsi konversi harus berupa objek JSON.")
     return data
 
 
@@ -159,22 +159,22 @@ def download_conversion(
             job.status = "expired"
             db.commit()
         remove_job_files(job.id)
-        raise ExpiredError("This download link has expired. Please convert the file again.")
+        raise ExpiredError("Tautan unduhan sudah kedaluwarsa. Silakan konversi ulang berkas.")
 
     if job.status == "failed":
         raise ValidationAppError(
-            job.error_message or "This conversion failed, so there is no result to download."
+            job.error_message or "Konversi gagal, sehingga tidak ada hasil untuk diunduh."
         )
     if job.status != "completed" or not job.output_path:
-        raise ForbiddenError("The result is not ready yet.")
+        raise ForbiddenError("Hasil belum siap.")
 
     path = Path(job.output_path)
     if not path.is_file():
-        raise ExpiredError("The result file is no longer available. Please convert the file again.")
+        raise ExpiredError("Berkas hasil sudah tidak tersedia. Silakan konversi ulang.")
     try:
         path = ensure_within(path, OUTPUT_DIR)
     except Exception:
-        raise ExpiredError("The result file is no longer available.")
+        raise ExpiredError("Berkas hasil sudah tidak tersedia.")
 
     extension = path.suffix.lstrip(".").lower()
     media_type = MIME_BY_EXT.get(extension) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -183,6 +183,137 @@ def download_conversion(
         media_type=media_type,
         filename=job.output_filename or path.name,
         headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/{job_id}/files/{file_index}/download")
+def download_batch_file(
+    file_index: int,
+    job: ConversionJob = Depends(owned_job),
+    db: Session = Depends(get_db),
+):
+    """Download one successful file from a multi-file batch.
+
+    Batch conversions keep the combined ZIP as the primary result, but each
+    successful file is also stored individually so it can be retrieved
+    without unpacking the archive.
+    """
+    if job.status == "expired" or _expiry_passed(job):
+        if job.status != "expired":
+            job.status = "expired"
+            db.commit()
+        remove_job_files(job.id)
+        raise ExpiredError("Tautan unduhan sudah kedaluwarsa. Silakan konversi ulang berkas.")
+
+    if job.status == "failed":
+        raise ValidationAppError(
+            job.error_message or "Konversi gagal, sehingga tidak ada hasil untuk diunduh."
+        )
+    if job.status != "completed" or not job.batch_results_json:
+        raise NotFoundError("Tidak ada hasil per berkas untuk konversi ini.")
+
+    try:
+        results = json.loads(job.batch_results_json)
+    except ValueError:
+        results = []
+    entry = next(
+        (
+            item
+            for item in results
+            if int(item.get("index", -1)) == file_index
+        ),
+        None,
+    )
+    if not entry or not entry.get("success") or not entry.get("output_filename"):
+        raise NotFoundError("Berkas hasil ini tidak tersedia.")
+
+    filename = Path(str(entry["output_filename"])).name
+    path = OUTPUT_DIR / job.id / "files" / str(file_index) / filename
+    if not path.is_file():
+        raise ExpiredError("Berkas hasil ini sudah tidak tersedia. Silakan konversi ulang.")
+    try:
+        path = ensure_within(path, OUTPUT_DIR)
+    except Exception:
+        raise NotFoundError("Berkas hasil ini tidak tersedia.")
+
+    extension = path.suffix.lstrip(".").lower()
+    media_type = MIME_BY_EXT.get(extension) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=filename,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/{job_id}/download-zip")
+def download_batch_zip(
+    job: ConversionJob = Depends(owned_job),
+    db: Session = Depends(get_db),
+):
+    """Download the ZIP archive for a batch conversion."""
+    if job.status == "expired" or _expiry_passed(job):
+        if job.status != "expired":
+            job.status = "expired"
+            db.commit()
+        remove_job_files(job.id)
+        raise ExpiredError("Tautan unduhan sudah kedaluwarsa. Silakan konversi ulang berkas.")
+
+    if job.status == "failed":
+        raise ValidationAppError(
+            job.error_message or "Konversi gagal, sehingga tidak ada hasil untuk diunduh."
+        )
+    if job.status != "completed" or not job.zip_path:
+        raise ForbiddenError("Tidak ada arsip ZIP untuk konversi ini.")
+
+    path = Path(job.zip_path)
+    if not path.is_file():
+        raise ExpiredError("Arsip ZIP sudah tidak tersedia. Silakan konversi ulang.")
+    try:
+        path = ensure_within(path, OUTPUT_DIR)
+    except Exception:
+        raise ExpiredError("Arsip ZIP sudah tidak tersedia.")
+
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=job.zip_filename or "DocuConvert_Results.zip",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/{job_id}/pages/{page_number}/preview")
+def page_preview(
+    page_number: int,
+    job: ConversionJob = Depends(owned_job),
+    db: Session = Depends(get_db),
+):
+    """Serve the real rendered preview for one page of this job.
+
+    Only files recorded during processing and still present on disk are served;
+    there is no URL for a page that was never rendered.
+    """
+    if job.status == "expired" or _expiry_passed(job):
+        if job.status != "expired":
+            job.status = "expired"
+            db.commit()
+        remove_job_files(job.id)
+        raise ExpiredError("Pratinjau sudah kedaluwarsa. Silakan konversi ulang berkas.")
+
+    if page_number < 1:
+        raise NotFoundError("Halaman tidak ditemukan.")
+    path = page_preview_file(job, page_number)
+    if path is None:
+        raise NotFoundError("Pratinjau tidak tersedia untuk halaman ini.")
+    try:
+        path = ensure_within(path, OUTPUT_DIR)
+    except Exception:
+        raise NotFoundError("Pratinjau tidak tersedia untuk halaman ini.")
+
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=300"},
     )
 
 

@@ -26,13 +26,26 @@ class Settings(BaseSettings):
     database_url: str = f"sqlite:///{(BACKEND_DIR / 'docuconvert.db').as_posix()}"
 
     storage_dir: Path = PROJECT_DIR / "storage"
-    max_upload_mb: int = 25
-    max_files_per_job: int = 10
+    max_upload_mb: int = 200
+    max_files_per_job: int = 15
+    max_batch_size_mb: int = 1024
     result_ttl_hours: int = 24
     cleanup_interval_minutes: int = 15
-    conversion_timeout_seconds: int = 180
+    conversion_timeout_seconds: int = 300
+    preview_dpi: int = 96
+    preview_max_width: int = 1400
+    preview_max_pages: int = 60
     allow_anonymous: bool = True
     rate_limit_per_minute: int = 60
+
+    # Performance tuning. Bigger pools help parallel batches but each busy
+    # conversion is CPU-bound, so more workers than cores just adds context
+    # switching. Tune after profiling on real hardware.
+    conversion_workers: int = 2
+    max_concurrent_uploads: int = 3
+    zip_compression_level: int = 6
+    result_cache_hours: int = 6
+    result_cache_max_file_mb: int = 50
 
     cors_origins: str = (
         "http://localhost:3000,http://127.0.0.1:3000,"
@@ -40,6 +53,7 @@ class Settings(BaseSettings):
     )
 
     libreoffice_path: str | None = None
+    word_path: str | None = None
     tesseract_cmd: str | None = None
 
     @field_validator("storage_dir", mode="before")

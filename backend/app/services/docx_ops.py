@@ -12,10 +12,11 @@ from docx.text.paragraph import Paragraph
 
 from app.core.errors import ConversionError
 from app.services.base import ConversionContext, ConversionResult
-from app.services.capabilities import libreoffice_available
+from app.services.capabilities import libreoffice_available, word_available
 from app.services.html_ops import render_html_to_pdf, wrap_html
 from app.services.html_to_docx import html_to_document
 from app.services.office_ops import convert_with_soffice
+from app.services.word_com import convert_with_word, font_warnings
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PDF_MIME = "application/pdf"
@@ -62,12 +63,73 @@ def _table_markdown(table: Table) -> str:
     return "\n".join([rows[0], separator, *rows[1:]])
 
 
+def _inches(value, fallback: float) -> float:
+    try:
+        inches = float(value.inches)
+    except (AttributeError, TypeError, ValueError):
+        return fallback
+    return inches if inches > 0 else fallback
+
+
+def _section_page_css(document: Document) -> tuple[str, list[str]]:
+    """Read paper size, orientation and margins from the DOCX page setup."""
+    warnings: list[str] = []
+    sections = list(document.sections)
+    first = sections[0]
+    width = _inches(first.page_width, 8.27)
+    height = _inches(first.page_height, 11.69)
+    top = _inches(first.top_margin, 1.0)
+    bottom = _inches(first.bottom_margin, 1.0)
+    left = _inches(first.left_margin, 1.0)
+    right = _inches(first.right_margin, 1.0)
+    css = (
+        "@page { size: "
+        f"{width:.2f}in {height:.2f}in; "
+        f"margin: {top:.2f}in {right:.2f}in {bottom:.2f}in {left:.2f}in; }}"
+    )
+    if len(sections) > 1:
+        sizes = {
+            (
+                round(_inches(section.page_width, width), 2),
+                round(_inches(section.page_height, height), 2),
+            )
+            for section in sections
+        }
+        warnings.append(
+            f"Dokumen memiliki {len(sections)} bagian. Ukuran halaman bagian pertama "
+            f"({width:.2f} x {height:.2f} inci) dipakai oleh renderer HTML."
+            + (" Ukuran bagian lain berbeda dan tidak dapat divariasikan oleh renderer ini." if len(sizes) > 1 else "")
+        )
+    return css, warnings
+
+
 def docx_to_pdf(ctx: ConversionContext) -> ConversionResult:
-    _open_docx(ctx.input)  # validates the file
+    document = _open_docx(ctx.input)  # validates the file
     stem = Path(ctx.original_name).stem or "document"
+    warnings: list[str] = []
+
+    # Microsoft Word is the reference renderer: pagination, fonts, headers/footers,
+    # tables, images and floating shapes come out exactly as Word lays them out.
+    if word_available():
+        try:
+            output = convert_with_word(ctx.input, ctx.workdir)
+            warnings.extend(font_warnings(ctx.input))
+            return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
+        except ConversionError as exc:
+            warnings.append(
+                f"Microsoft Word tidak dapat mengekspor dokumen ini ({exc.message}). "
+                "Renderer pengganti dipakai; tata letak dapat berbeda."
+            )
+
     if libreoffice_available():
-        output = convert_with_soffice(ctx.input, "pdf", ctx.workdir)
-        return ConversionResult(output, f"{stem}.pdf", PDF_MIME, [])
+        try:
+            output = convert_with_soffice(ctx.input, "pdf", ctx.workdir)
+            return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
+        except ConversionError as exc:
+            warnings.append(
+                f"LibreOffice gagal mengonversi dokumen ini ({exc.message}). "
+                "Renderer pengganti dipakai; tata letak dapat berbeda."
+            )
 
     import mammoth
 
@@ -76,12 +138,25 @@ def docx_to_pdf(ctx: ConversionContext) -> ConversionResult:
             result = mammoth.convert_to_html(handle)
     except Exception as exc:
         raise ConversionError("The Word document could not be converted.") from exc
-    html = wrap_html(result.value, stem)
+
+    page_css, section_warnings = _section_page_css(document)
+    warnings.extend(section_warnings)
+    warnings.insert(
+        0,
+        "Microsoft Word dan LibreOffice tidak tersedia, sehingga renderer HTML sederhana "
+        "dipakai. Font, header/footer, kolom, dan objek kompleks dapat berbeda dari aslinya; "
+        "ukuran halaman, orientasi, dan margin tetap diambil dari file Word.",
+    )
+    try:
+        if document.element.body.xpath('.//w:br[@w:type="page"]'):
+            warnings.append(
+                "Dokumen berisi page break eksplisit; renderer HTML hanya mempertahankannya "
+                "bila fitur tersebut didukung oleh konversi Word ke HTML."
+            )
+    except Exception:  # pragma: no cover - malformed XML
+        pass
+    html = wrap_html(result.value, stem, page_css=page_css)
     output = render_html_to_pdf(html, ctx.workdir / "document.pdf")
-    warnings = [
-        "LibreOffice is not installed, so a simplified HTML-based renderer was used. "
-        "Fonts, page breaks, columns and complex objects may differ from the original."
-    ]
     if result.messages:
         warnings.append("Some Word features could not be reproduced by the fallback renderer.")
     return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)

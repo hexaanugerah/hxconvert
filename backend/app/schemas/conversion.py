@@ -14,6 +14,7 @@ class ConversionJobOut(BaseModel):
     input_format: str
     output_format: str
     status: JobStatus
+    stage: str | None = None
     file_size: int
     output_filename: str | None = None
     output_size: int | None = None
@@ -25,6 +26,12 @@ class ConversionJobOut(BaseModel):
     completed_at: datetime | None = None
     expires_at: datetime | None = None
     download_url: str | None = None
+    page_count: int | None = None
+    pages: list[dict[str, Any]] = []
+    # Batch conversion fields
+    batch_results: list[dict[str, Any]] = []
+    zip_filename: str | None = None
+    has_zip: bool = False
 
 
 class ConversionListOut(BaseModel):

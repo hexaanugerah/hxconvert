@@ -7,9 +7,9 @@ const STATUS: Record<
   JobStatus,
   { label: string; variant: "default" | "success" | "destructive" | "warning" | "muted"; icon: typeof CheckCircle2 }
 > = {
-  queued: { label: "Menunggu", variant: "muted", icon: Clock },
-  processing: { label: "Diproses", variant: "default", icon: Loader2 },
-  completed: { label: "Berhasil", variant: "success", icon: CheckCircle2 },
+  queued: { label: "Dalam antrean", variant: "muted", icon: Clock },
+  processing: { label: "Mengonversi", variant: "default", icon: Loader2 },
+  completed: { label: "Selesai", variant: "success", icon: CheckCircle2 },
   failed: { label: "Gagal", variant: "destructive", icon: XCircle },
   expired: { label: "Kedaluwarsa", variant: "warning", icon: Clock },
 };

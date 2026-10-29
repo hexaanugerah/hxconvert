@@ -29,10 +29,16 @@ blockquote { border-left: 2pt solid #cbd5e1; margin-left: 0; padding-left: 8pt; 
 """
 
 
-def wrap_html(body: str, title: str = "Document") -> str:
+def wrap_html(body: str, title: str = "Document", page_css: str | None = None) -> str:
+    """Wrap body HTML in a printable document.
+
+    ``page_css`` lets callers carry the source document's paper size, orientation
+    and margins into the PDF instead of always printing A4 portrait.
+    """
+    extra = f"<style>{page_css}</style>" if page_css else ""
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'/>"
-        f"<title>{_escape(title)}</title><style>{BASE_CSS}</style></head><body>{body}</body></html>"
+        f"<title>{_escape(title)}</title><style>{BASE_CSS}</style>{extra}</head><body>{body}</body></html>"
     )
 
 

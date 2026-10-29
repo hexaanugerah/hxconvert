@@ -1,34 +1,86 @@
-# Environment files (never commit secrets)
-.env
-.env.*
-!**/.env.example
-!**/.env.local.example
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
+# Dependencies
 backend/.venv/
-backend/docuconvert.db
-backend/.requirements.sha256
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Node / Next.js
+backend/venv/
 frontend/node_modules/
+
+# Environment
+.env
+.env.local
+.env.production
+backend/.env
+frontend/.env.local
+
+# Database
+backend/docuconvert.db
+backend/*.sqlite3
+backend/*.db
+
+# Storage
+storage/
+backend/storage/
+
+# Build outputs
 frontend/.next/
 frontend/out/
-frontend/tsconfig.tsbuildinfo
-frontend/public/pdf.worker.min.mjs
+frontend/dist/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/*.pyd
 
-# Local storage (documents must never be committed)
-storage/**
-!storage/.gitkeep
-
-# Logs and editor files
-*.log
+# IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+logs/
+backend/logs/
+frontend/logs/
+
+# Testing
+.coverage
+htmlcov/
+backend/.pytest_cache/
+frontend/coverage/
+
+# TypeScript build info
+frontend/tsconfig.tsbuildinfo
+
+# Docker
+.docker/
+certbot/
+
+# Misc
+*.tar.gz
+*.zip
+*.bak
+*.tmp
+
+# Local test fixtures and scratch scripts
+/test.pdf
+/test.docx
+/test.txt
+/test_batch_*.txt
+/test_image.png
+/test_scanned.pdf
+/backend/test_scanned.pdf
+/batch_job.json
+/debug_*.py
+/fix_*.py
+/update_registry*.py
+*_cookies.txt
+
+# Generated at dev/build time by scripts/copy-pdf-worker.mjs
+frontend/public/pdf.worker.min.mjs
+
+# Environment-specific benchmark output
+backend/benchmark_results_*.json

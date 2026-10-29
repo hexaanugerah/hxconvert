@@ -28,23 +28,50 @@ def convert(ctx: ConversionContext) -> ConversionResult:
 
     first_page = doc[0]
     page_width = first_page.rect.width or 595
-    scale = (SLIDE_WIDTH_EMU / EMU_PER_POINT) / page_width
+    page_height = first_page.rect.height or 842
 
     prs = Presentation()
     prs.slide_width = Emu(SLIDE_WIDTH_EMU)
-    prs.slide_height = Emu(int(doc[0].rect.height * scale * EMU_PER_POINT))
+    prs.slide_height = Emu(int(SLIDE_WIDTH_EMU * page_height / page_width))
+
+    page_sizes = {
+        (round(float(doc[index].rect.width), 1), round(float(doc[index].rect.height), 1))
+        for index in range(min(doc.page_count, MAX_PAGES))
+    }
+    if len(page_sizes) > 1:
+        warnings.append(
+            "Halaman PDF memiliki ukuran berbeda. Setiap halaman diskalakan secara proporsional "
+            "ke ukuran slide tanpa memotong konten."
+        )
 
     try:
         for page_index in range(min(doc.page_count, MAX_PAGES)):
             page = doc[page_index]
             slide = prs.slides.add_slide(prs.slide_layouts[6])
+            # Fit this page into the slide while keeping its aspect ratio.
+            page_scale = min(
+                prs.slide_width / max(float(page.rect.width), 1.0),
+                prs.slide_height / max(float(page.rect.height), 1.0),
+            )
+            offset_x = (prs.slide_width - page.rect.width * page_scale) / 2
+            offset_y = (prs.slide_height - page.rect.height * page_scale) / 2
 
             if include_images:
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
                 image_path = ctx.workdir / f"_slide-{page_index + 1}.png"
                 pixmap.save(str(image_path))
+                image_scale = min(
+                    prs.slide_width / max(pixmap.width, 1),
+                    prs.slide_height / max(pixmap.height, 1),
+                )
+                image_width = int(pixmap.width * image_scale)
+                image_height = int(pixmap.height * image_scale)
                 slide.shapes.add_picture(
-                    str(image_path), 0, 0, width=prs.slide_width, height=prs.slide_height
+                    str(image_path),
+                    int((prs.slide_width - image_width) / 2),
+                    int((prs.slide_height - image_height) / 2),
+                    width=image_width,
+                    height=image_height,
                 )
 
             blocks = [
@@ -60,10 +87,10 @@ def convert(ctx: ConversionContext) -> ConversionResult:
                 rect = fitz.Rect(block["bbox"])
                 if rect.width < 2 or rect.height < 2:
                     continue
-                left = Emu(int(rect.x0 * scale * EMU_PER_POINT))
-                top = Emu(int(rect.y0 * scale * EMU_PER_POINT))
-                width = Emu(int(max(rect.width, 20) * scale * EMU_PER_POINT))
-                height = Emu(int(max(rect.height, 14) * scale * EMU_PER_POINT))
+                left = Emu(int(offset_x + rect.x0 * page_scale))
+                top = Emu(int(offset_y + rect.y0 * page_scale))
+                width = Emu(int(max(rect.width, 20) * page_scale))
+                height = Emu(int(max(rect.height, 14) * page_scale))
                 box = slide.shapes.add_textbox(left, top, width, height)
                 frame = box.text_frame
                 frame.word_wrap = True
@@ -81,7 +108,9 @@ def convert(ctx: ConversionContext) -> ConversionResult:
                     run = paragraph.add_run()
                     run.text = text
                     size = max(span.get("size", 12) for span in line.get("spans", [{}]))
-                    run.font.size = Pt(max(5, min(96, round(float(size) * scale, 1))))
+                    run.font.size = Pt(
+                        max(5, min(96, round(float(size) * page_scale / EMU_PER_POINT, 1)))
+                    )
                     bold = any(bool(span.get("flags", 0) & 16) for span in line.get("spans", []))
                     run.font.bold = bold
                     run.font.color.rgb = RGBColor(0x11, 0x18, 0x27)

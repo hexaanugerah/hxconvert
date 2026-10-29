@@ -1,6 +1,7 @@
 """Storage layout, secure file writes and path containment checks."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import shutil
@@ -24,6 +25,7 @@ ALLOWED_EXTENSIONS = {
 }
 
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._ -]+")
+INPUT_MANIFEST = "_upload-order.json"
 
 
 def sanitize_filename(name: str | None) -> str:
@@ -61,6 +63,37 @@ def job_temp_dir(job_id: str) -> Path:
 def stored_name(original: str | None) -> str:
     ext = extension_of(original)
     return f"{uuid.uuid4().hex}{ext if ext in ALLOWED_EXTENSIONS else ''}"
+
+
+def write_input_manifest(job_id: str, entries: list[dict[str, str]]) -> None:
+    """Record upload order and original names next to the stored files.
+
+    Stored filenames are random UUIDs, so directory iteration order does not
+    reflect the order the user selected the files in. The manifest is the
+    authoritative order used by the worker.
+    """
+    path = job_input_dir(job_id) / INPUT_MANIFEST
+    path.write_text(json.dumps({"files": entries}, ensure_ascii=False), encoding="utf-8")
+
+
+def read_input_manifest(job_id: str) -> list[dict[str, str]]:
+    """Return the recorded upload order, or an empty list for legacy jobs."""
+    path = job_input_dir(job_id) / INPUT_MANIFEST
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, list):
+        return []
+    entries: list[dict[str, str]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        stored = str(item.get("stored") or "")
+        if stored and Path(stored).name == stored:
+            entries.append({"stored": stored, "original": str(item.get("original") or stored)})
+    return entries
 
 
 def ensure_within(path: Path, root: Path) -> Path:

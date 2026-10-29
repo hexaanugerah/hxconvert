@@ -87,13 +87,16 @@ def get_or_create_guest_id(request: Request, response=None) -> str | None:
             pass
     guest_id = str(uuid.uuid4())
     if response is not None:
+        # For development (HTTP), use SameSite=none without Secure to allow cross-origin cookies.
+        # Browsers allow this on localhost. For production (HTTPS), use SameSite=lax with Secure.
+        is_production = settings.environment == "production"
         response.set_cookie(
             GUEST_COOKIE,
             guest_id,
             max_age=60 * 60 * 24 * 30,
             httponly=True,
-            samesite="lax",
-            secure=settings.environment == "production",
+            samesite="lax" if is_production else "none",
+            secure=is_production,
             path="/",
         )
     return guest_id

@@ -1,13 +1,25 @@
 import {
+  Crop,
   FileImage,
   FileSpreadsheet,
   FileText,
   FileType2,
+  Files,
+  Gauge,
+  GitCompareArrows,
   Image,
   Languages,
+  LockKeyhole,
+  Minimize2,
+  PenTool,
   Presentation,
+  RotateCw,
+  Scaling,
   ScanText,
+  ShieldCheck,
   Sparkles,
+  UnlockKeyhole,
+  Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -18,9 +30,24 @@ export const CATEGORY_META: Record<
   { label: string; description: string; icon: LucideIcon }
 > = {
   pdf: {
-    label: "PDF",
-    description: "Konversi, gabungkan, pisahkan, dan olah halaman PDF.",
+    label: "Konversi PDF",
+    description: "PDF ke Word, Excel, PowerPoint, gambar, dan teks.",
     icon: FileText,
+  },
+  manage: {
+    label: "Kelola PDF",
+    description: "Gabungkan, pisah, putar, potong, urutkan, dan beri tanda air.",
+    icon: Files,
+  },
+  optimize: {
+    label: "Optimasi PDF",
+    description: "Kompres, optimalkan, dan perbaiki berkas PDF.",
+    icon: Gauge,
+  },
+  security: {
+    label: "Keamanan PDF",
+    description: "Lindungi kata sandi, buka proteksi, dan tanda tangan visual.",
+    icon: ShieldCheck,
   },
   word: {
     label: "Word",
@@ -38,8 +65,8 @@ export const CATEGORY_META: Record<
     icon: Presentation,
   },
   image: {
-    label: "Gambar & OCR",
-    description: "Format gambar, ke PDF, dan ekstraksi teks dengan OCR.",
+    label: "Alat Gambar",
+    description: "Konversi, kompres, ubah ukuran, putar, dan OCR gambar.",
     icon: Image,
   },
   text: {
@@ -65,6 +92,15 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   "add-watermark": FileText,
   "remove-pages": FileText,
   "reorder-pdf": FileText,
+  "extract-pages": Files,
+  "crop-pages": Crop,
+  "resize-pages": Scaling,
+  "optimize-pdf": Gauge,
+  "repair-pdf": Wrench,
+  "protect-pdf": LockKeyhole,
+  "unlock-pdf": UnlockKeyhole,
+  "add-signature": PenTool,
+  "compare-pdf": GitCompareArrows,
   "docx-to-pdf": FileText,
   "docx-to-txt": FileText,
   "docx-to-html": FileText,
@@ -80,6 +116,9 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   "pptx-to-pdf": FileText,
   "pptx-to-images": FileImage,
   "convert-image": Image,
+  "compress-image": Minimize2,
+  "resize-image": Scaling,
+  "rotate-image": RotateCw,
   "image-ocr": ScanText,
   "pdf-ocr-to-word": Languages,
   "html-to-pdf": FileText,

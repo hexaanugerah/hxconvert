@@ -49,6 +49,23 @@ function Find-LibreOffice {
     return $null
 }
 
+function Find-MicrosoftWord {
+    $command = Get-Command WINWORD.EXE -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $base) { continue }
+        foreach ($version in @("Office16", "Office15", "Office14")) {
+            foreach ($candidate in @(
+                (Join-Path $base "Microsoft Office\root\$version\WINWORD.EXE"),
+                (Join-Path $base "Microsoft Office\$version\WINWORD.EXE")
+            )) {
+                if (Test-Path $candidate) { return $candidate }
+            }
+        }
+    }
+    return $null
+}
+
 function Find-Tesseract {
     $command = Get-Command tesseract -ErrorAction SilentlyContinue
     if ($command) { return $command.Source }
@@ -173,12 +190,21 @@ if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
 
 Write-Section "Dependensi eksternal (opsional)"
 
+$winword = Find-MicrosoftWord
+if ($winword) {
+    Write-Ok "Microsoft Word: $winword"
+    Write-Host "         Word ke PDF memakai Word Automation (tata letak paling akurat)."
+} else {
+    Write-Warn "Microsoft Word tidak ditemukan."
+    Write-Host "         Word ke PDF memakai LibreOffice atau renderer HTML; tata letak dapat berbeda."
+}
+
 $soffice = Find-LibreOffice
 if ($soffice) {
     Write-Ok "LibreOffice: $soffice"
 } else {
     Write-Warn "LibreOffice tidak ditemukan."
-    Write-Host "         Word/Excel ke PDF memakai renderer HTML sederhana (tata letak terbatas)."
+    Write-Host "         Excel ke PDF memakai renderer HTML sederhana (tata letak terbatas)."
     Write-Host "         Konversi PowerPoint ke PDF/gambar TIDAK tersedia tanpa LibreOffice."
     Write-Host "         Unduh: https://www.libreoffice.org/download/download-libreoffice/"
 }

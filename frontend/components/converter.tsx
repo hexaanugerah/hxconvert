@@ -19,6 +19,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { ImagePreviewGrid } from "@/components/image-preview";
 import { JobStatusBadge } from "@/components/job-status-badge";
 import { PdfPreview } from "@/components/pdf-preview";
 import { UploadDropzone } from "@/components/upload-dropzone";
@@ -28,18 +29,34 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { downloadJobFile } from "@/lib/api";
+import { API_URL, downloadJobFile } from "@/lib/api";
 import { TOOL_ICONS } from "@/lib/tools";
 import { cn, extensionOf, formatBytes } from "@/lib/utils";
 import { findTool, getFormats } from "@/services/formats";
 import { createConversion, getJob } from "@/services/conversions";
 import { usePendingFileStore } from "@/store/pending-file";
-import type { ConversionJob, Tool, ToolOption } from "@/types";
+import type { ConversionJob, ConversionPage, Tool, ToolOption } from "@/types";
 
 const REQUIRED_OPTIONS: Record<string, string[]> = {
   "remove-pages": ["pages"],
   "reorder-pdf": ["order"],
+  "extract-pages": ["pages"],
+  "protect-pdf": ["password"],
+  "unlock-pdf": ["password"],
 };
+
+function stageLabel(stage: string | null | undefined, status: string): string {
+  if (status === "queued") return "Dalam antrean";
+  if (status === "processing") {
+    if (stage === "packaging") return "Menyiapkan ZIP";
+    if (stage === "converting") return "Mengonversi";
+    return "Memproses";
+  }
+  if (status === "completed") return "Selesai";
+  if (status === "failed") return "Gagal";
+  if (status === "expired") return "Kedaluwarsa";
+  return "Menunggu";
+}
 
 function defaultsFor(tool: Tool): Record<string, string | number | boolean> {
   const result: Record<string, string | number | boolean> = {};
@@ -51,6 +68,29 @@ function defaultsFor(tool: Tool): Record<string, string | number | boolean> {
 
 function terminal(status: string | undefined): boolean {
   return status === "completed" || status === "failed" || status === "expired";
+}
+
+const PAPER_SIZES: [number, number, string][] = [
+  [595.3, 841.9, "A4"],
+  [612, 792, "Letter"],
+  [612, 1008, "Legal"],
+  [841.9, 1190.6, "A3"],
+  [595.3, 935.4, "F4"],
+];
+
+function describePageSize(page: ConversionPage | undefined): string | null {
+  if (!page?.width_pt || !page.height_pt) return null;
+  const width = page.width_pt;
+  const height = page.height_pt;
+  const shortSide = Math.min(width, height);
+  const longSide = Math.max(width, height);
+  const paper = PAPER_SIZES.find(
+    ([paperWidth, paperHeight]) =>
+      Math.abs(shortSide - paperWidth) < 6 && Math.abs(longSide - paperHeight) < 6,
+  );
+  const millimetres = `${Math.round((width / 72) * 25.4)} × ${Math.round((height / 72) * 25.4)} mm`;
+  const orientation = width > height ? "lanskap" : "potret";
+  return `${paper ? `${paper[2]} · ` : ""}${millimetres} · ${orientation}`;
 }
 
 export function Converter({ toolId }: { toolId: string }) {
@@ -66,7 +106,7 @@ export function Converter({ toolId }: { toolId: string }) {
   const [elapsed, setElapsed] = useState(0);
   const notified = useRef<string | null>(null);
 
-  const maxUploadMb = formatsQuery.data?.capabilities.limits.max_upload_mb ?? 25;
+  const maxUploadMb = formatsQuery.data?.capabilities.limits.max_upload_mb ?? 200;
 
   useEffect(() => {
     if (!tool) return;
@@ -149,6 +189,15 @@ export function Converter({ toolId }: { toolId: string }) {
         return `${option?.label ?? name} wajib diisi.`;
       }
     }
+    if (tool.id === "add-signature") {
+      const pdfs = files.filter((file) => extensionOf(file.name) === "pdf").length;
+      const images = files.filter((file) =>
+        ["png", "jpg", "jpeg"].includes(extensionOf(file.name)),
+      ).length;
+      if (pdfs !== 1 || images !== 1) {
+        return "Pilih tepat satu berkas PDF dan satu gambar tanda tangan (PNG/JPG).";
+      }
+    }
     return null;
   }
 
@@ -176,6 +225,17 @@ export function Converter({ toolId }: { toolId: string }) {
     }
   }
 
+  async function handleBatchFileDownload(url: string, filename: string) {
+    setDownloading(true);
+    try {
+      await downloadJobFile(url, filename);
+    } catch (error) {
+      toast.error("Unduhan berkas gagal", { description: (error as Error).message });
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   function reset() {
     setJobId(null);
     setFiles([]);
@@ -184,7 +244,25 @@ export function Converter({ toolId }: { toolId: string }) {
   }
 
   const Icon = useMemo(() => TOOL_ICONS[toolId] ?? FileText, [toolId]);
-  const isPdfFirst = files[0]?.name.toLowerCase().endsWith(".pdf");
+  const pdfFiles = useMemo(
+    () => files.filter((file) => file.name.toLowerCase().endsWith(".pdf")),
+    [files],
+  );
+  const imageFiles = useMemo(
+    () =>
+      files.filter((file) => /\.(png|jpe?g|webp|bmp|tiff?|gif)$/i.test(file.name)),
+    [files],
+  );
+  const previewableFiles = pdfFiles.length + imageFiles.length;
+  const sourcePageSize = useMemo(() => {
+    if (!job?.pages.length) return null;
+    const first = describePageSize(job.pages[0]);
+    if (!first) return null;
+    const sizes = new Set(
+      job.pages.map((page) => `${Math.round(page.width_pt ?? 0)}x${Math.round(page.height_pt ?? 0)}`),
+    );
+    return sizes.size > 1 ? `${first} · ukuran halaman campuran` : first;
+  }, [job]);
 
   if (formatsQuery.isLoading) {
     return (
@@ -205,7 +283,9 @@ export function Converter({ toolId }: { toolId: string }) {
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-center">
           <AlertTriangle className="mx-auto h-8 w-8 text-destructive" />
           <h1 className="mt-3 text-lg font-semibold">Backend tidak dapat dihubungi</h1>
-          <p className="mt-2 text-sm text-muted-foreground">{(formatsQuery.error as Error).message}</p>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {(formatsQuery.error as Error).message}
+          </p>
           <Button className="mt-4" onClick={() => void formatsQuery.refetch()}>Coba lagi</Button>
         </div>
       </div>
@@ -217,7 +297,9 @@ export function Converter({ toolId }: { toolId: string }) {
       <div className="container max-w-3xl py-16 text-center">
         <h1 className="text-2xl font-semibold">Alat konversi tidak ditemukan</h1>
         <p className="mt-2 text-muted-foreground">Alat yang Anda cari tidak tersedia di server ini.</p>
-        <Button className="mt-6" asChild><Link href="/tools">Lihat semua alat</Link></Button>
+        <Button className="mt-6" asChild>
+          <Link href="/tools">Lihat semua alat</Link>
+        </Button>
       </div>
     );
   }
@@ -274,15 +356,29 @@ export function Converter({ toolId }: { toolId: string }) {
                 maxSizeMb={maxUploadMb}
                 disabled={!tool.available || busy}
               />
-              {isPdfFirst && (
+              {previewableFiles > 0 && (
                 <div className="mt-4">
                   <div className="mb-2 flex items-center justify-between">
-                    <p className="text-xs font-medium text-muted-foreground">Pratinjau</p>
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Pratinjau berkas ({previewableFiles})
+                    </p>
                     <Button type="button" variant="ghost" size="sm" onClick={() => setShowPreview((value) => !value)}>
                       {showPreview ? "Sembunyikan" : "Tampilkan"}
                     </Button>
                   </div>
-                  {showPreview && <PdfPreview file={files[0]} />}
+                  {showPreview && (
+                    <div className="space-y-3">
+                      {pdfFiles.slice(0, 1).map((file) => (
+                        <PdfPreview key={`${file.name}-${file.size}-${file.lastModified}`} file={file} />
+                      ))}
+                      {pdfFiles.length > 1 && (
+                        <p className="text-xs text-muted-foreground">
+                          Menampilkan pratinjau PDF pertama dari {pdfFiles.length} PDF yang dipilih.
+                        </p>
+                      )}
+                      {imageFiles.length > 0 && <ImagePreviewGrid files={imageFiles} />}
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>
@@ -396,31 +492,91 @@ export function Converter({ toolId }: { toolId: string }) {
                       <div className="h-1.5 overflow-hidden rounded-full bg-muted">
                         <div className="h-full w-1/3 animate-shimmer rounded-full bg-primary/70" />
                       </div>
+                      <p className="text-sm font-medium">
+                        {stageLabel(job.stage, job.status)}
+                      </p>
                       <p className="text-sm text-muted-foreground">
-                        Berkas sedang diproses di server. Persentase tidak ditampilkan karena backend
-                        tidak melaporkan kemajuan per tahap.
+                        Berkas sedang diproses di server. Persentase tidak ditampilkan karena durasi
+                        setiap berkas berbeda dan tidak diukur sebelumnya.
                       </p>
                     </div>
                   )}
 
                   {job.status === "completed" && (
                     <div className="space-y-3">
+                      {/* Batch results display */}
+                      {job.batch_results && job.batch_results.length > 0 && (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="font-medium">
+                              Batch selesai: {job.batch_results.filter((r: any) => r.success).length} dari {job.batch_results.length} berhasil
+                            </span>
+                            {job.has_zip && (
+                              <span className="text-xs text-emerald-600 font-medium">
+                                ZIP tersedia
+                              </span>
+                            )}
+                          </div>
+                          <div className="max-h-48 overflow-y-auto space-y-1 rounded border bg-muted/30 p-2">
+                            {job.batch_results.map((result, idx) => (
+                              <div key={idx} className="flex items-center justify-between gap-2 rounded px-2 py-1 text-xs">
+                                <span className="min-w-0 flex-1 truncate">{result.original_name}</span>
+                                {result.success && result.download_url ? (
+                                  <button
+                                    type="button"
+                                    className="inline-flex items-center gap-1 text-primary hover:underline disabled:opacity-50"
+                                    disabled={downloading}
+                                    onClick={() =>
+                                      void handleBatchFileDownload(
+                                        result.download_url as string,
+                                        result.output_filename || "hasil",
+                                      )
+                                    }
+                                  >
+                                    <Download className="h-3.5 w-3.5" />
+                                    Unduh
+                                  </button>
+                                ) : (
+                                  <span className="shrink-0 text-destructive">
+                                    {result.error_message ?? "Gagal"}
+                                  </span>
+                                )}
+                                <span className={result.success ? "text-emerald-600" : "text-destructive"}>
+                                  {result.success ? "✓" : "✗"}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* Single file or ZIP result */}
                       <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
                         <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium">{job.output_filename}</p>
                           <p className="text-xs text-muted-foreground">
                             {formatBytes(job.output_size)} · {job.output_format.toUpperCase()}
+                            {job.has_zip && " · ZIP"}
                           </p>
+                          {sourcePageSize && !job.has_zip && (
+                            <p className="text-xs text-muted-foreground">
+                              {job.page_count ?? job.pages.length} halaman · {sourcePageSize}
+                            </p>
+                          )}
                         </div>
                       </div>
-                      <Button className="w-full" onClick={() => void handleDownload()} disabled={downloading || !job.download_url}>
-                        {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                        Unduh hasil
-                      </Button>
-                      <Button variant="outline" className="w-full" onClick={reset}>
-                        <RotateCcw className="h-4 w-4" /> Konversi berkas lain
-                      </Button>
+                      
+                      {/* Download buttons */}
+                      <div className="space-y-2">
+                        <Button className="w-full" onClick={() => void handleDownload()} disabled={downloading || !job.download_url}>
+                          {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                          {job.has_zip ? "Unduh Semua (ZIP)" : "Unduh hasil"}
+                        </Button>
+                        <Button variant="outline" className="w-full" onClick={reset}>
+                          <RotateCcw className="h-4 w-4" /> Konversi berkas lain
+                        </Button>
+                      </div>
                     </div>
                   )}
 
@@ -445,6 +601,47 @@ export function Converter({ toolId }: { toolId: string }) {
                     </div>
                   )}
 
+                  {job.status === "completed" && job.pages.some((page) => page.preview_url) && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-muted-foreground">
+                        Pratinjau {job.page_count ?? job.pages.length} halaman hasil
+                      </p>
+                      <div className="grid grid-cols-3 gap-2">
+                        {job.pages.map((page) => (
+                          <a
+                            key={page.page_number}
+                            href={page.preview_url ? `${API_URL}${page.preview_url}` : undefined}
+                            target="_blank"
+                            rel="noreferrer"
+                            className={cn(
+                              "group overflow-hidden rounded-md border bg-muted/30",
+                              page.status === "failed" && "border-destructive/40",
+                              !page.preview_url && "pointer-events-none opacity-60",
+                            )}
+                            title={`Halaman ${page.page_number} (${page.status})`}
+                          >
+                            {page.preview_url ? (
+                              /* eslint-disable-next-line @next/next/no-img-element */
+                              <img
+                                src={`${API_URL}${page.preview_url}`}
+                                alt={`Halaman ${page.page_number}`}
+                                loading="lazy"
+                                className="aspect-[3/4] w-full object-contain transition-transform group-hover:scale-[1.02]"
+                              />
+                            ) : (
+                              <span className="flex aspect-[3/4] items-center justify-center p-2 text-center text-[10px] text-muted-foreground">
+                                {page.status === "failed" ? "Gagal" : "Menunggu"}
+                              </span>
+                            )}
+                            <span className="block px-1.5 py-1 text-[10px] text-muted-foreground">
+                              {page.page_number}
+                            </span>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {job.warnings.length > 0 && (
                     <details className="rounded-lg bg-muted/50 p-3 text-xs">
                       <summary className="cursor-pointer font-medium">
@@ -456,6 +653,28 @@ export function Converter({ toolId }: { toolId: string }) {
                         ))}
                       </ul>
                     </details>
+                  )}
+
+                  {job.page_count && job.status !== "completed" && (
+                    <div className="mt-4 rounded-lg border border-muted/50 bg-muted/30 p-3 text-sm">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <div className="flex-1">
+                          <p className="font-medium">{job.page_count} halaman terdeteksi</p>
+                          <p className="text-xs text-muted-foreground">
+                            {job.pages.filter((page) => page.status === "completed").length} berhasil ·{" "}
+                            {job.pages.filter((page) => page.status === "failed").length} gagal
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {job.error_message && (
+                    <div className="mt-4 p-3 bg-destructive/5 border border-destructive/30 text-sm text-destructive">
+                      <AlertTriangle className="mr-2 h-3.5 w-3.5" />
+                      <span>{job.error_message}</span>
+                    </div>
                   )}
                 </div>
               )}

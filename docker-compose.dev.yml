@@ -1,0 +1,82 @@
+version: "3.8"
+
+services:
+  # Development database (SQLite for simplicity, or PostgreSQL)
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_DB: docuconvert_dev
+  #     POSTGRES_USER: dev
+  #     POSTGRES_PASSWORD: dev
+  #   volumes:
+  #     - postgres_dev_data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+  # Redis for development
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+
+  # Backend with hot reload
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: docuconvert-backend-dev
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=sqlite:///./docuconvert.db
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - STORAGE_DIR=/app/storage
+      - MAX_UPLOAD_MB=25
+      - MAX_FILES_PER_JOB=10
+      - RESULT_TTL_HOURS=24
+      - CLEANUP_INTERVAL_MINUTES=15
+      - CONVERSION_TIMEOUT_SECONDS=180
+      - ALLOW_ANONYMOUS=true
+      - RATE_LIMIT_PER_MINUTE=120
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - LIBREOFFICE_PATH=/usr/bin/libreoffice
+      - TESSERACT_CMD=/usr/bin/tesseract
+    volumes:
+      - ./backend:/app
+      - storage_dev_data:/app/storage
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app"
+
+  # Frontend with hot reload
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: docuconvert-frontend-dev
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - WATCHPACK_POLLING=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  # postgres_dev_data:
+  redis_dev_data:
+  storage_dev_data:
+
+networks:
+  default:
+    name: docuconvert-dev-network
