@@ -24,6 +24,10 @@ from app.services.base import ConversionContext, ConversionResult
 from app.services.capabilities import libreoffice_available, ocr_available
 
 Handler = Callable[[ConversionContext], ConversionResult]
+# A batch handler converts several inputs at once and returns one result per
+# input, in order. ``None`` at an index means "use the normal handler instead"
+# (e.g. the fast path could not process that file).
+BatchHandler = Callable[[list[ConversionContext]], list["ConversionResult | None"]]
 
 CATEGORIES = [
     {"id": "pdf", "label": "Konversi PDF"},
@@ -60,6 +64,7 @@ class ToolSpec:
     inputs: tuple[str, ...]
     output: str
     handler: Handler
+    batch_handler: BatchHandler | None = None
     output_filename: str = "result"
     multiple: bool = False
     min_files: int = 1
@@ -723,6 +728,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         output_filename="document",
         max_files=15,
         handler=docx_ops.docx_to_pdf,
+        batch_handler=docx_ops.docx_to_pdf_batch,
     ),
     ToolSpec(
         id="docx-to-txt",
@@ -818,6 +824,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         output_filename="spreadsheet",
         max_files=15,
         handler=excel_ops.xlsx_to_pdf,
+        batch_handler=excel_ops.xlsx_to_pdf_batch,
     ),
     ToolSpec(
         id="xlsx-to-csv",
@@ -890,6 +897,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         output_filename="presentation",
         max_files=15,
         handler=pptx_ops.pptx_to_pdf,
+        batch_handler=pptx_ops.pptx_to_pdf_batch,
         requires="libreoffice",
     ),
     ToolSpec(
@@ -902,6 +910,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         output_filename="slides",
         max_files=15,
         handler=pptx_ops.pptx_to_images,
+        batch_handler=pptx_ops.pptx_to_images_batch,
         requires="libreoffice",
         options=(
             ToolOption(name="dpi", label="Resolusi (DPI)", type="number", default=120, min=72, max=300),

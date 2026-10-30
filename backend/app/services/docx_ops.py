@@ -15,8 +15,8 @@ from app.services.base import ConversionContext, ConversionResult
 from app.services.capabilities import libreoffice_available, word_available
 from app.services.html_ops import render_html_to_pdf, wrap_html
 from app.services.html_to_docx import html_to_document
-from app.services.office_ops import convert_with_soffice
-from app.services.word_com import convert_with_word, font_warnings
+from app.services.office_ops import convert_parallel_with_soffice, convert_with_soffice
+from app.services.word_com import convert_parallel_with_word, convert_with_word, font_warnings
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PDF_MIME = "application/pdf"
@@ -160,6 +160,60 @@ def docx_to_pdf(ctx: ConversionContext) -> ConversionResult:
     if result.messages:
         warnings.append("Some Word features could not be reproduced by the fallback renderer.")
     return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
+
+
+def docx_to_pdf_batch(
+    contexts: list[ConversionContext],
+) -> list[ConversionResult | None]:
+    """Batch fast path: export every DOCX with one shared Word session.
+
+    Files that Word cannot export are retried in a single LibreOffice
+    invocation before falling back to the per-file handler. ``None`` entries
+    use the normal per-file handler (which may use the HTML fallback).
+    """
+    if len(contexts) < 2:
+        return [None] * len(contexts)
+
+    for ctx in contexts:
+        ctx.workdir.mkdir(parents=True, exist_ok=True)
+    jobs = [(ctx.input, ctx.workdir / "document.pdf") for ctx in contexts]
+    outputs: list[Path | None] = [None] * len(contexts)
+    from_word: list[bool] = [False] * len(contexts)
+
+    if word_available():
+        try:
+            outcomes = convert_parallel_with_word(jobs, contexts[0].workdir.parent)
+        except ConversionError:
+            outcomes = []
+        for index, outcome in enumerate(outcomes):
+            if outcome.output is not None:
+                outputs[index] = outcome.output
+                from_word[index] = True
+
+    pending = [index for index, produced in enumerate(outputs) if produced is None]
+    if pending and libreoffice_available():
+        try:
+            lo_outcomes = convert_parallel_with_soffice(
+                [jobs[index] for index in pending], "pdf", contexts[0].workdir.parent
+            )
+        except ConversionError:
+            lo_outcomes = []
+        for pointer, outcome in zip(pending, lo_outcomes):
+            if outcome.output is not None:
+                outputs[pointer] = outcome.output
+
+    results: list[ConversionResult | None] = []
+    for index, ctx in enumerate(contexts):
+        produced = outputs[index]
+        if produced is None:
+            results.append(None)
+            continue
+        stem = Path(ctx.original_name).stem or "document"
+        warnings = font_warnings(ctx.input) if from_word[index] else []
+        results.append(
+            ConversionResult(produced, f"{stem}.pdf", PDF_MIME, warnings)
+        )
+    return results
 
 
 def docx_to_txt(ctx: ConversionContext) -> ConversionResult:

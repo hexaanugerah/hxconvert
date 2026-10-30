@@ -17,7 +17,7 @@ from app.core.errors import ConversionError, ValidationAppError
 from app.services.base import ConversionContext, ConversionResult
 from app.services.capabilities import libreoffice_available
 from app.services.html_ops import PDF_MIME, render_html_to_pdf, wrap_html
-from app.services.office_ops import convert_with_soffice
+from app.services.office_ops import convert_parallel_with_soffice, convert_with_soffice
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MAX_SHEETS = 30
@@ -119,6 +119,43 @@ def _print_settings(path: Path) -> list[tuple[str, int | None]]:
     except Exception:
         return []
     return settings
+
+
+def xlsx_to_pdf_batch(
+    contexts: list[ConversionContext],
+) -> list[ConversionResult | None]:
+    """Batch fast path: convert every spreadsheet in one soffice invocation.
+
+    ``None`` entries fall back to the normal per-file handler.
+    """
+    if len(contexts) < 2 or not libreoffice_available():
+        return [None] * len(contexts)
+
+    indices: list[int] = []
+    jobs: list[tuple[Path, Path]] = []
+    for index, ctx in enumerate(contexts):
+        ctx.workdir.mkdir(parents=True, exist_ok=True)
+        try:
+            _open_workbook(ctx.input).close()
+        except ConversionError:
+            continue  # per-file handler reports this error properly
+        indices.append(index)
+        jobs.append((ctx.input, ctx.workdir / "document.pdf"))
+    try:
+        outcomes = convert_parallel_with_soffice(
+            jobs, "pdf", contexts[0].workdir.parent
+        )
+    except ConversionError:
+        return [None] * len(contexts)
+
+    results: list[ConversionResult | None] = [None] * len(contexts)
+    for pointer, outcome in zip(indices, outcomes):
+        if outcome.output is None:
+            continue
+        ctx = contexts[pointer]
+        stem = Path(ctx.original_name).stem or "spreadsheet"
+        results[pointer] = ConversionResult(outcome.output, f"{stem}.pdf", PDF_MIME)
+    return results
 
 
 def xlsx_to_pdf(ctx: ConversionContext) -> ConversionResult:

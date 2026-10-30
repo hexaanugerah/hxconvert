@@ -228,6 +228,31 @@ def create_batch_zip(
     return zip_path, zip_filename
 
 
+def _from_conversion_result(
+    index: int, original_name: str, result: ConversionResult
+) -> BatchFileResult:
+    """Turn a handler result (from a batch fast path) into a batch entry."""
+    try:
+        if result.path.exists() and result.path.stat().st_size > 0:
+            return BatchFileResult(
+                index=index,
+                original_name=original_name,
+                success=True,
+                output_path=result.path,
+                output_filename=result.filename,
+                output_mime=result.mime,
+                warnings=result.warnings,
+            )
+    except OSError:
+        pass
+    return BatchFileResult(
+        index=index,
+        original_name=original_name,
+        success=False,
+        error_message="Konverter menghasilkan berkas kosong.",
+    )
+
+
 def _convert_one(
     index: int,
     input_path: Path,
@@ -293,33 +318,66 @@ def process_batch_conversion(
     workers = _worker_count()
     file_results: list[BatchFileResult] = [None] * len(input_files)  # type: ignore[list-item]
 
-    if len(input_files) == 1 or workers == 1:
-        for index, (input_path, original_name) in enumerate(zip(input_files, original_names)):
-            file_results[index] = _convert_one(
-                index, input_path, original_name, tool, options, workdir
+    pending = list(range(len(input_files)))
+
+    # Tools with a batch handler can share expensive resources (a Word session
+    # for DOCX -> PDF). Everything not produced there falls back to the normal
+    # per-file handler, so failures stay isolated.
+    if len(input_files) > 1 and workers > 1 and tool.batch_handler is not None:
+        contexts = [
+            ConversionContext(
+                inputs=[input_path],
+                original_names=[original_name],
+                options=options,
+                workdir=workdir / f"file_{index}",
             )
-    else:
-        with ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix=f"batch-{batch_id[:8]}",
-        ) as pool:
-            futures = [
-                pool.submit(
-                    _convert_one,
+            for index, (input_path, original_name) in enumerate(
+                zip(input_files, original_names)
+            )
+        ]
+        try:
+            converted = tool.batch_handler(contexts)
+        except Exception:  # noqa: BLE001 - fall back to per-file conversion
+            converted = []
+        for index, result in enumerate(converted):
+            if index >= len(input_files) or result is None:
+                continue
+            file_results[index] = _from_conversion_result(
+                index, original_names[index], result
+            )
+            pending.remove(index)
+
+    if pending:
+        if len(pending) == 1 or workers == 1:
+            for index in pending:
+                file_results[index] = _convert_one(
                     index,
-                    input_path,
-                    original_name,
+                    input_files[index],
+                    original_names[index],
                     tool,
                     options,
                     workdir,
                 )
-                for index, (input_path, original_name) in enumerate(
-                    zip(input_files, original_names)
-                )
-            ]
-            for future in as_completed(futures):
-                batch_result = future.result()
-                file_results[batch_result.index] = batch_result
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(workers, len(pending)),
+                thread_name_prefix=f"batch-{batch_id[:8]}",
+            ) as pool:
+                futures = {
+                    pool.submit(
+                        _convert_one,
+                        index,
+                        input_files[index],
+                        original_names[index],
+                        tool,
+                        options,
+                        workdir,
+                    ): index
+                    for index in pending
+                }
+                for future in as_completed(futures):
+                    batch_result = future.result()
+                    file_results[batch_result.index] = batch_result
 
     file_results = [
         result
