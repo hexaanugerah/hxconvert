@@ -1,4 +1,4 @@
-# XConvert
+# HXconvertX
 
 Aplikasi web full-stack untuk mengonversi dan mengolah dokumen: PDF, Word, Excel,
 PowerPoint, gambar, teks, dan OCR. Frontend Next.js terhubung ke REST API FastAPI

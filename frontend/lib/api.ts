@@ -78,7 +78,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     });
   } catch {
     throw new ApiError(
-      "Tidak dapat terhubung ke server XConvert. Pastikan backend berjalan dan URL API benar.",
+      "Tidak dapat terhubung ke server HXconvertX. Pastikan backend berjalan dan URL API benar.",
       0,
       "network_error",
     );

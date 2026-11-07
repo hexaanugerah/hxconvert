@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Menjalankan XConvert (FastAPI + Next.js) untuk pengembangan lokal di Windows.
+    Menjalankan HXconvertX (FastAPI + Next.js) untuk pengembangan lokal di Windows.
 
 .DESCRIPTION
     Memeriksa Python, Node.js, dan dependensi eksternal opsional (LibreOffice,
@@ -74,7 +74,7 @@ function Find-Tesseract {
     return $null
 }
 
-Write-Host "XConvert - local development" -ForegroundColor White
+Write-Host "HXconvertX - local development" -ForegroundColor White
 Write-Host "Project: $root"
 
 Write-Section "Pemeriksaan dependensi utama"
@@ -117,7 +117,7 @@ if (Test-PortInUse 8000) {
         $backendAlreadyRunning = $true
         Write-Ok "Backend sudah berjalan di port 8000; tidak dijalankan ulang."
     } catch {
-        Write-Fail "Port 8000 dipakai proses lain yang bukan XConvert. Hentikan proses itu terlebih dahulu."
+        Write-Fail "Port 8000 dipakai proses lain yang bukan HXconvertX. Hentikan proses itu terlebih dahulu."
         exit 1
     }
 }
@@ -268,7 +268,7 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 }
 
 if ($healthy) {
-    Write-Host "XConvert siap digunakan." -ForegroundColor Green
+    Write-Host "HXconvertX siap digunakan." -ForegroundColor Green
     Write-Host "  Aplikasi : http://127.0.0.1:3000"
     Write-Host "  API docs : http://127.0.0.1:8000/docs"
     Start-Process "http://127.0.0.1:3000"

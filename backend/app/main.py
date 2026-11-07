@@ -1,4 +1,4 @@
-"""XConvert API application."""
+"""HXconvertX API application."""
 from __future__ import annotations
 
 import asyncio
@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
         logger.exception("Initial expiry cleanup failed")
     task = asyncio.create_task(cleanup_loop())
     logger.info(
-        "XConvert API started (environment=%s, OCR=%s, LibreOffice=%s)",
+        "HXconvertX API started (environment=%s, OCR=%s, LibreOffice=%s)",
         settings.environment,
         capabilities_snapshot()["ocr"]["available"],
         capabilities_snapshot()["libreoffice"]["available"],
@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="XConvert API",
+    title="HXconvertX API",
     description="Document conversion and PDF processing API.",
     version=VERSION,
     lifespan=lifespan,
@@ -111,7 +111,7 @@ def health():
 @app.get("/", include_in_schema=False)
 def root():
     return {
-        "name": "XConvert API",
+        "name": "HXconvertX API",
         "version": VERSION,
         "docs": "/docs",
         "health": f"{api}/health",

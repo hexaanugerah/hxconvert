@@ -220,7 +220,7 @@ def create_batch_zip(
         Tuple of (zip_path, zip_filename)
     """
     output_dir = job_output_dir(batch_id)
-    zip_filename = "XConvert_Results_{start}.zip".format(start=batch_id[:8])
+    zip_filename = "HXconvertX_Results_{start}.zip".format(start=batch_id[:8])
     zip_path = output_dir / zip_filename
 
     used_files: dict[str, int] = {}
@@ -272,7 +272,7 @@ def create_batch_zip(
         warned = [result for result in file_results if result.warnings]
         if failed or warned:
             report_lines = [
-                "Laporan Konversi Batch XConvert",
+                "Laporan Konversi Batch HXconvertX",
                 f"ID Batch: {batch_id}",
                 f"Alat: {tool.label} ({tool.id})",
                 f"Total berkas: {len(file_results)}",

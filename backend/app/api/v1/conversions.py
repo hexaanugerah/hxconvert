@@ -277,7 +277,7 @@ def download_batch_zip(
     return FileResponse(
         path,
         media_type="application/zip",
-        filename=job.zip_filename or "XConvert_Results.zip",
+        filename=job.zip_filename or "HXconvertX_Results.zip",
         headers={"Cache-Control": "no-store"},
     )
 

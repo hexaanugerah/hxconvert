@@ -16,7 +16,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "XConvert"
+    app_name: str = "HXconvertX"
     environment: str = "development"
     api_prefix: str = "/api/v1"
 

@@ -1,4 +1,4 @@
-# XConvert Deployment Guide
+# HXconvertX Deployment Guide
 
 ## Quick Start (Development)
 

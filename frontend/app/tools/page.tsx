@@ -4,7 +4,7 @@ import { ToolsExplorer } from "@/components/tools-explorer";
 
 export const metadata: Metadata = {
   title: "Alat Konversi",
-  description: "Semua alat konversi dokumen yang tersedia di server XConvert.",
+  description: "Semua alat konversi dokumen yang tersedia di server HXconvertX.",
 };
 
 export default function ToolsPage() {
