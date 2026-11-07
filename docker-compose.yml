@@ -56,7 +56,7 @@ services:
       - CONVERSION_WORKERS=${CONVERSION_WORKERS:-0}
       - ALLOW_ANONYMOUS=${ALLOW_ANONYMOUS:-true}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
-      - CORS_ORIGINS=${CORS_ORIGINS:-https://xconvert.com,https://www.xconvert.com}
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://HXconvert.com,https://www.HXconvert.com}
       - LIBREOFFICE_PATH=/usr/bin/libreoffice
       - TESSERACT_CMD=/usr/bin/tesseract
     volumes:

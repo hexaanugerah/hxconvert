@@ -52,8 +52,8 @@ chmod +x deploy.sh
 ```
 
 4. **Verify:**
-- Visit `https://xconvert.com`
-- API docs at `https://xconvert.com/api/v1/docs`
+- Visit `https://HXconvert.com`
+- API docs at `https://HXconvert.com/api/v1/docs`
 
 ### Option 2: Railway (Easiest PaaS)
 
@@ -88,7 +88,7 @@ fly launch --name docuconvert
 
 # Set secrets
 fly secrets set SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-fly secrets set CORS_ORIGINS="https://xconvert.com"
+fly secrets set CORS_ORIGINS="https://HXconvert.com"
 fly deploy
 ```
 
@@ -162,7 +162,7 @@ docker compose logs -f frontend
 docker compose logs -f nginx
 
 # Health check
-curl https://xconvert.com/api/v1/health
+curl https://HXconvert.com/api/v1/health
 ```
 
 ## Backup & Restore
@@ -199,7 +199,7 @@ docker compose logs certbot
 
 # Force renewal
 docker compose run --rm --entrypoint certbot certbot certonly --webroot \
-  -w /var/www/certbot --force-renewal -d xconvert.com
+  -w /var/www/certbot --force-renewal -d HXconvert.com
 docker compose exec nginx nginx -s reload
 ```
 
