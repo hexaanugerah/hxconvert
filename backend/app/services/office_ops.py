@@ -259,12 +259,12 @@ def convert_batch_with_soffice(
         profile = _profile_pool_dir() / f"profile-{locks.index(selected)}"
         profile.mkdir(parents=True, exist_ok=True)
         try:
-            result = run_with_profile(profile)
+            run_with_profile(profile)
         except ConversionError:
             # A corrupt/hung shared profile: retry once with a fresh isolated one.
             profile = workdir / f"lo-profile-{uuid.uuid4().hex[:8]}"
             profile.mkdir(parents=True, exist_ok=True)
-            result = run_with_profile(profile)
+            run_with_profile(profile)
 
     outcomes: list[SofficeBatchOutcome] = []
     for index, (_, output) in enumerate(jobs):

@@ -47,14 +47,16 @@ services:
       - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-docuconvert}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-docuconvert}
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY is required}
       - STORAGE_DIR=/app/storage
-      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-25}
-      - MAX_FILES_PER_JOB=${MAX_FILES_PER_JOB:-10}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-200}
+      - MAX_BATCH_SIZE_MB=${MAX_BATCH_SIZE_MB:-1024}
+      - MAX_FILES_PER_JOB=${MAX_FILES_PER_JOB:-15}
       - RESULT_TTL_HOURS=${RESULT_TTL_HOURS:-24}
       - CLEANUP_INTERVAL_MINUTES=${CLEANUP_INTERVAL_MINUTES:-15}
-      - CONVERSION_TIMEOUT_SECONDS=${CONVERSION_TIMEOUT_SECONDS:-180}
-      - ALLOW_ANONYMOUS=${ALLOW_ANONYMOUS:-false}
+      - CONVERSION_TIMEOUT_SECONDS=${CONVERSION_TIMEOUT_SECONDS:-300}
+      - CONVERSION_WORKERS=${CONVERSION_WORKERS:-0}
+      - ALLOW_ANONYMOUS=${ALLOW_ANONYMOUS:-true}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
-      - CORS_ORIGINS=${CORS_ORIGINS:-https://yourdomain.com}
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://xconvert.com,https://www.xconvert.com}
       - LIBREOFFICE_PATH=/usr/bin/libreoffice
       - TESSERACT_CMD=/usr/bin/tesseract
     volumes:
@@ -87,10 +89,12 @@ services:
       dockerfile: Dockerfile
       args:
         # Baked into the client bundle at build time; keep it in sync with .env.production.
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        # Empty string = relative URLs (same-origin through nginx) — recommended.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL-}
     container_name: docuconvert-frontend
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # Runtime copy only; the client value is inlined at build time via the ARG above.
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL-}
     depends_on:
       - backend
     healthcheck:

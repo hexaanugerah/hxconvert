@@ -90,12 +90,18 @@ def get_or_create_guest_id(request: Request, response=None) -> str | None:
         # For development (HTTP), use SameSite=none without Secure to allow cross-origin cookies.
         # Browsers allow this on localhost. For production (HTTPS), use SameSite=lax with Secure.
         is_production = settings.environment == "production"
+        # SameSite=None without Secure is INVALID and browsers drop the whole
+        # cookie, which silently broke guest job access in development. The
+        # frontend now always calls the API on the page's own host (see
+        # lib/api.ts), so the pairing stays same-site and plain SameSite=Lax
+        # works over HTTP in development and over HTTPS with Secure in
+        # production (same domain behind the reverse proxy).
         response.set_cookie(
             GUEST_COOKIE,
             guest_id,
             max_age=60 * 60 * 24 * 30,
             httponly=True,
-            samesite="lax" if is_production else "none",
+            samesite="lax",
             secure=is_production,
             path="/",
         )

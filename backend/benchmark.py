@@ -73,13 +73,13 @@ def _scanned_page_png() -> bytes:
     return buffer.getvalue()
 
 
-def make_text_pdf(path: Path, pages: int = 10) -> Path:
+def make_text_pdf(path: Path, pages: int = 10, stamp: int = 0) -> Path:
     import fitz
 
     doc = fitz.open()
     for index in range(pages):
         page = doc.new_page(width=595, height=842)
-        page.insert_text((72, 70), f"Quarterly Report - Page {index + 1}", fontsize=22)
+        page.insert_text((72, 70), f"Quarterly Report {stamp} - Page {index + 1}", fontsize=22)
         for line in range(12):
             page.insert_text(
                 (72, 110 + line * 26),
@@ -229,6 +229,49 @@ def batch_convert(samples: list[Path], run_dir: Path, workers: int, options: dic
     return timings
 
 
+def warm_process_pool() -> None:
+    """Prime the app's persistent process pool (worker spawn + imports) so it
+    is not charged to the first measured batch."""
+    try:
+        from app.services.batch_conversion import _cpu_pool, _worker_count
+
+        pool = _cpu_pool(_worker_count())
+        pool.submit(lambda: True).result(timeout=120)
+    except Exception as exc:
+        print(f"process-pool warmup skipped: {exc}")
+
+
+def batch_convert_app(samples: list[Path], run_dir: Path, options: dict, count_key: str) -> dict:
+    """Measure the real application batch path: process_batch_conversion,
+    including pool scheduling (process or thread, by tool) and the ZIP build.
+    Worker count comes from the app's own _worker_count()."""
+    from app.services.batch_conversion import process_batch_conversion
+    from app.core.storage import remove_job_files
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    batch_id = f"bench-{count_key}-{int(time.time())}"
+    start = time.perf_counter()
+    result = process_batch_conversion(
+        batch_id,
+        "pdf-to-word",
+        samples,
+        [path.name for path in samples],
+        options,
+        run_dir,
+    )
+    total_ms = round((time.perf_counter() - start) * 1000, 1)
+    from app.services.batch_conversion import _worker_count
+
+    entry: dict = {
+        "total_ms": total_ms,
+        "successful": result.successful,
+        "failed": result.failed,
+        "workers": _worker_count(),
+    }
+    remove_job_files(batch_id)
+    return entry
+
+
 def zip_benchmark(results_dir: Path) -> dict:
     """Time building a ZIP of 15 chosen-format results through the app's path.
 
@@ -327,6 +370,11 @@ SCENARIOS = {
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", default="run")
+    parser.add_argument(
+        "--skip-large",
+        action="store_true",
+        help="Skip the very slow 50/100 MB samples (their 'before' values are already recorded).",
+    )
     args = parser.parse_args()
 
     base = Path(tempfile.mkdtemp(prefix=f"docuconvert-bench-{args.label}-"))
@@ -369,17 +417,19 @@ def main() -> None:
         results["word_to_pdf:docx_many_images"] = entry
 
         # Large files (50 MB and 100 MB full-image PDFs).
-        for mb in (50, 100):
-            sample = samples_dir / f"large_{mb}mb.pdf"
-            if not sample.exists():
-                start = time.perf_counter()
-                fill_to_mb(sample, mb)
-                print(f"built {mb} MB sample in {round((time.perf_counter() - start))}s")
-            entry = convert_pdf_to_word(sample, {"mode": "full-image"}, base / "runs" / "large")
-            entry["input_mb"] = round(sample.stat().st_size / (1024 * 1024), 1)
-            results[f"pdf_to_word:large_{mb}mb"] = entry
+        if not args.skip_large:
+            for mb in (50, 100):
+                sample = samples_dir / f"large_{mb}mb.pdf"
+                if not sample.exists():
+                    start = time.perf_counter()
+                    fill_to_mb(sample, mb)
+                    print(f"built {mb} MB sample in {round((time.perf_counter() - start))}s")
+                entry = convert_pdf_to_word(sample, {"mode": "full-image"}, base / "runs" / "large")
+                entry["input_mb"] = round(sample.stat().st_size / (1024 * 1024), 1)
+                results[f"pdf_to_word:large_{mb}mb"] = entry
 
         # Batches of 5 / 10 / 15 files with 1 vs 2 workers (image + text mix).
+        warm_process_pool()
         batch_results: dict = {}
         image_sample = samples_dir / "image_pdf_1p.pdf"
         text_sample = samples_dir / "text_pdf_10p.pdf"
@@ -389,6 +439,25 @@ def main() -> None:
                 key = f"batch_{count}_files_w{workers}"
                 entry = batch_convert(samples, base / "runs" / key, workers, {"mode": "full-image"})
                 batch_results[key] = entry
+
+            # The real application path: process pool (auto workers) + ZIP.
+            # "unique" = 15 genuinely distinct text PDFs; "duplicates" = the
+            # same mixed list (identical contents) to measure the fast path.
+            unique_samples = []
+            for i in range(count):
+                path = samples_dir / f"uniq_text_{count}_{i}.pdf"
+                if not path.exists():
+                    make_text_pdf(path, pages=2, stamp=i)
+                unique_samples.append(path)
+            key = f"batch_{count}_files_app_auto"
+            entry = batch_convert_app(
+                unique_samples, base / "runs" / f"{key}-unique", {"mode": "editable"}, f"{count}u"
+            )
+            batch_results[key] = entry
+            entry = batch_convert_app(
+                samples, base / "runs" / f"{key}-dups", {"mode": "full-image"}, f"{count}d"
+            )
+            batch_results[f"{key}_duplicates"] = entry
         results["batch"] = batch_results
 
         try:

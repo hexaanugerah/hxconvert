@@ -71,7 +71,7 @@ export default function RegisterPage() {
             <span className="mx-auto grid h-11 w-11 place-items-center rounded-xl bg-primary/10 text-primary">
               <UserPlus className="h-5 w-5" />
             </span>
-            <CardTitle className="mt-3 text-2xl">Buat akun DocuConvert</CardTitle>
+            <CardTitle className="mt-3 text-2xl">Buat akun XConvert</CardTitle>
             <CardDescription>Riwayat lintas perangkat, profil, dan pengaturan akun.</CardDescription>
           </CardHeader>
           <CardContent>

@@ -3,7 +3,7 @@ import Link from "next/link";
 
 export const metadata: Metadata = {
   title: "Kebijakan Privasi",
-  description: "Bagaimana DocuConvert menyimpan, memproses, dan menghapus dokumen Anda.",
+  description: "Bagaimana XConvert menyimpan, memproses, dan menghapus dokumen Anda.",
 };
 
 export default function PrivacyPage() {
@@ -15,7 +15,7 @@ export default function PrivacyPage() {
       <div className="prose-doc mt-8">
         <h2>1. Prinsip utama</h2>
         <p>
-          DocuConvert memproses dokumen di server yang menjalankan aplikasi ini. Dokumen tidak dikirim ke layanan
+          XConvert memproses dokumen di server yang menjalankan aplikasi ini. Dokumen tidak dikirim ke layanan
           pihak ketiga, tidak dianalisis untuk iklan, dan tidak dibaca oleh manusia. Isi dokumen tidak ditulis ke
           log aplikasi.
         </p>
@@ -74,7 +74,7 @@ export default function PrivacyPage() {
 
         <h2>8. Kontak</h2>
         <p>
-          Karena DocuConvert adalah aplikasi yang dijalankan sendiri, pertanyaan privasi ditujukan kepada
+          Karena XConvert adalah aplikasi yang dijalankan sendiri, pertanyaan privasi ditujukan kepada
           pengelola server tempat Anda menggunakan aplikasi ini.
         </p>
       </div>

@@ -57,7 +57,7 @@ export default function LoginPage() {
             <span className="mx-auto grid h-11 w-11 place-items-center rounded-xl bg-primary/10 text-primary">
               <LogIn className="h-5 w-5" />
             </span>
-            <CardTitle className="mt-3 text-2xl">Masuk ke DocuConvert</CardTitle>
+            <CardTitle className="mt-3 text-2xl">Masuk ke XConvert</CardTitle>
             <CardDescription>Kelola riwayat konversi dan pengaturan akun Anda.</CardDescription>
           </CardHeader>
           <CardContent>

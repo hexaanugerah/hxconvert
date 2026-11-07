@@ -154,7 +154,7 @@ def _image_record(path: Path, preview_dir: Path, page_number: int, budget: int) 
             thumbnail.save(preview_path, format="PNG", optimize=True)
             record.preview = preview_path.name
             record.pixel_width, record.pixel_height = width, height
-    except Exception as exc:
+    except Exception:
         record.status = "failed"
         record.error = "The image could not be read for preview."
     return record

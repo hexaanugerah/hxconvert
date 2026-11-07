@@ -540,7 +540,6 @@ def _convert_editable(
         (0.8 * 72, 0.8 * 72, 0.8 * 72, 0.8 * 72),
     )
     current_size = (first.width, first.height)
-    mixed_page_sizes = False
     document.core_properties.title = Path(ctx.original_name).stem
 
     tables_source = _TableSource(ctx.input)
@@ -560,7 +559,6 @@ def _convert_editable(
                         section, width, height, _detect_margins(info)
                     )
                     current_size = (width, height)
-                    mixed_page_sizes = True
                 elif page_breaks:
                     document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
             available_width_inches = max(

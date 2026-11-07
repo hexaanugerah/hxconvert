@@ -1,14 +1,11 @@
 """PDF -> PPTX. Each PDF page becomes a slide with editable text boxes."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import fitz
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.util import Emu, Pt
 
-from app.core.errors import ConversionError
 from app.services.base import ConversionContext, ConversionResult
 from app.services.pdf_ops import _open_pdf
 

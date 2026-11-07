@@ -104,3 +104,49 @@ def test_batch_handler_none_falls_back_per_file(tmp_path, monkeypatch):
     assert converted == [1]
     assert result.successful == 2
     assert result.failed == 0
+
+
+def test_duplicate_files_convert_once(tmp_path, monkeypatch):
+    """Byte-identical files are converted a single time and their results reused."""
+    calls: list[Path] = []
+
+    def handler(ctx: ConversionContext) -> ConversionResult:
+        calls.append(ctx.input)
+        return ConversionResult(
+            _write_pdf(ctx.workdir / "out.pdf"),
+            "out.pdf",
+            "application/pdf",
+        )
+
+    tool = ToolSpec(
+        id="fake-pdf",
+        label="Fake PDF",
+        description="",
+        category="pdf",
+        inputs=(".pdf",),
+        output="pdf",
+        handler=handler,
+    )
+    monkeypatch.setattr(batch_conversion, "get_tool", lambda _: tool)
+    monkeypatch.setattr(batch_conversion, "_worker_count", lambda: 1)  # keep the run inline
+    monkeypatch.setattr(batch_conversion, "job_output_dir", lambda bid: tmp_path / bid)
+
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    same_a = inputs_dir / "a.pdf"
+    same_b = inputs_dir / "b.pdf"
+    other = inputs_dir / "c.pdf"
+    same_a.write_bytes(b"identical-pdf-bytes")
+    same_b.write_bytes(b"identical-pdf-bytes")
+    other.write_bytes(b"different-pdf-bytes")
+    inputs = [same_a, same_b, other]
+    names = [path.name for path in inputs]
+
+    result = process_batch_conversion(
+        "batch-dups", "fake-pdf", inputs, names, {}, tmp_path / "work"
+    )
+
+    assert len(calls) == 2  # a & b share one conversion
+    assert result.successful == 3
+    assert result.failed == 0
+    assert all(item.success for item in result.file_results)

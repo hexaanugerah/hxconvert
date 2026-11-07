@@ -32,11 +32,12 @@ services:
       - DATABASE_URL=sqlite:///./docuconvert.db
       - SECRET_KEY=dev-secret-key-change-in-production
       - STORAGE_DIR=/app/storage
-      - MAX_UPLOAD_MB=25
-      - MAX_FILES_PER_JOB=10
+      - MAX_UPLOAD_MB=200
+      - MAX_BATCH_SIZE_MB=1024
+      - MAX_FILES_PER_JOB=15
       - RESULT_TTL_HOURS=24
       - CLEANUP_INTERVAL_MINUTES=15
-      - CONVERSION_TIMEOUT_SECONDS=180
+      - CONVERSION_TIMEOUT_SECONDS=300
       - ALLOW_ANONYMOUS=true
       - RATE_LIMIT_PER_MINUTE=120
       - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000

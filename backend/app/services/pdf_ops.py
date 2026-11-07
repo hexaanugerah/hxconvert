@@ -182,7 +182,6 @@ def extract_text(ctx: ConversionContext) -> ConversionResult:
                 if not text:
                     empty_pages.append(index + 1)
             chunks.append(f"--- Page {index + 1} ---\n{text}")
-        total_pages = doc.page_count
     finally:
         doc.close()
 
@@ -620,7 +619,7 @@ def add_signature(ctx: ConversionContext) -> ConversionResult:
     """
     import io
 
-    from PIL import Image
+    from PIL import Image, ImageChops
 
     pdf_inputs = [path for path in ctx.inputs if path.suffix.lower() == ".pdf"]
     image_inputs = [
@@ -640,11 +639,15 @@ def add_signature(ctx: ConversionContext) -> ConversionResult:
             try:
                 with Image.open(io.BytesIO(data)) as opened:
                     image = opened.convert("RGBA")
-                    pixels = [
-                        (r, g, b, 0) if r > 235 and g > 235 and b > 235 else (r, g, b, a)
-                        for r, g, b, a in image.getdata()
-                    ]
-                    image.putdata(pixels)
+                    # Pixels whose every channel is near-white become fully
+                    # transparent (identical rule to the previous per-pixel
+                    # loop, just done with channel maths instead of getdata).
+                    red, green, blue, alpha = image.split()
+                    smallest = ImageChops.darker(ImageChops.darker(red, green), blue)
+                    not_white = smallest.point(lambda value: 0 if value > 235 else 255)
+                    image = Image.merge(
+                        "RGBA", (red, green, blue, ImageChops.multiply(alpha, not_white))
+                    )
                     buffer = io.BytesIO()
                     image.save(buffer, format="PNG")
                     data = buffer.getvalue()
@@ -741,7 +744,8 @@ def compare_pdfs(ctx: ConversionContext) -> ConversionResult:
             difference = ImageChops.difference(image_a, image_b)
             mask = difference.point(lambda value: 255 if value > 32 else 0)
             total = image_a.width * image_a.height
-            changed_pixels = sum(1 for value in mask.getdata() if value)
+            zero_count = mask.histogram()[0]
+            changed_pixels = total - zero_count
             ratio = changed_pixels / total if total else 0.0
             if ratio >= 0.001:
                 changed_pages.append(index + 1)

@@ -1,7 +1,6 @@
 """PDF -> XLSX table extraction using pdfplumber and openpyxl."""
 from __future__ import annotations
 
-from pathlib import Path
 import re
 
 import pdfplumber

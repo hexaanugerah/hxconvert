@@ -80,7 +80,7 @@ const FAQ = [
   {
     question: "Apakah hasil konversi PDF ke Word dapat diedit?",
     answer:
-      "Ya. DocuConvert mengekstrak teks dan struktur PDF lalu membangun DOCX dengan paragraf, gaya judul, daftar, tabel, dan gambar. Tata letak yang sangat kompleks seperti beberapa kolom, rumus, atau tabel bergabung dapat berubah dan akan dilaporkan sebagai catatan hasil.",
+      "Ya. XConvert mengekstrak teks dan struktur PDF lalu membangun DOCX dengan paragraf, gaya judul, daftar, tabel, dan gambar. Tata letak yang sangat kompleks seperti beberapa kolom, rumus, atau tabel bergabung dapat berubah dan akan dilaporkan sebagai catatan hasil.",
   },
   {
     question: "Format apa yang benar-benar didukung?",
@@ -260,7 +260,7 @@ export default function LandingPage() {
               <h2 className="text-xl font-semibold">Keamanan & privasi dokumen</h2>
             </div>
             <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-              DocuConvert dirancang untuk pemakaian lokal maupun server pribadi. Berkas tidak dikirim ke layanan
+              XConvert dirancang untuk pemakaian lokal maupun server pribadi. Berkas tidak dikirim ke layanan
               pihak ketiga dan tidak dibaca oleh manusia.
             </p>
             <ul className="mt-5 space-y-3 text-sm">

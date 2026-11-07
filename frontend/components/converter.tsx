@@ -476,6 +476,19 @@ export function Converter({ toolId }: { toolId: string }) {
                 </div>
               )}
 
+              {jobId && !job && jobQuery.isError && (
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+                    <p className="font-medium">Status konversi tidak dapat dimuat.</p>
+                    <p className="mt-1 text-xs">{(jobQuery.error as Error).message}</p>
+                  </div>
+                  <Button variant="outline" className="w-full" onClick={() => void jobQuery.refetch()}>
+                    <RotateCcw className="h-4 w-4" /> Coba muat status lagi
+                  </Button>
+                  <Button variant="ghost" className="w-full" onClick={reset}>Pilih berkas lain</Button>
+                </div>
+              )}
+
               {job && (
                 <div className="animate-fade-in space-y-4">
                   <div className="flex items-center justify-between gap-2">

@@ -14,8 +14,9 @@ COPY . .
 
 # NEXT_PUBLIC_* values are inlined into the client bundle at build time, so the
 # API URL must be supplied as a build argument instead of a runtime environment
-# variable.
-ARG NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+# variable. Empty string = relative requests (same-origin through nginx) — the
+# recommended production setup for xconvert.com.
+ARG NEXT_PUBLIC_API_URL=""
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_TELEMETRY_DISABLED=1
 

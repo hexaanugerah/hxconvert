@@ -8,8 +8,8 @@ import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: {
-    default: "DocuConvert — Konversi dokumen yang cepat dan aman",
-    template: "%s | DocuConvert",
+    default: "XConvert — Konversi dokumen yang cepat dan aman",
+    template: "%s | XConvert",
   },
   description:
     "Konversi PDF ke Word, Word ke PDF, Excel, PowerPoint, gambar, dan OCR dalam satu aplikasi. Berkas Anda diproses di server sendiri dan dihapus otomatis.",

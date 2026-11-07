@@ -1,4 +1,4 @@
-# DocuConvert Deployment Guide
+# XConvert Deployment Guide
 
 ## Quick Start (Development)
 
@@ -52,8 +52,8 @@ chmod +x deploy.sh
 ```
 
 4. **Verify:**
-- Visit `https://yourdomain.com`
-- API docs at `https://yourdomain.com/api/v1/docs`
+- Visit `https://xconvert.com`
+- API docs at `https://xconvert.com/api/v1/docs`
 
 ### Option 2: Railway (Easiest PaaS)
 
@@ -88,7 +88,7 @@ fly launch --name docuconvert
 
 # Set secrets
 fly secrets set SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-fly secrets set CORS_ORIGINS="https://yourdomain.com"
+fly secrets set CORS_ORIGINS="https://xconvert.com"
 fly deploy
 ```
 
@@ -101,7 +101,7 @@ fly deploy
 | `POSTGRES_PASSWORD` | Yes | Strong database password |
 | `SECRET_KEY` | Yes | 48+ char random string |
 | `CORS_ORIGINS` | Yes | Frontend URL(s), comma-separated |
-| `NEXT_PUBLIC_API_URL` | Yes | API origin, **without** `/api/v1` (e.g., `https://yourdomain.com`) |
+| `NEXT_PUBLIC_API_URL` | No | Kosongkan (disarankan) untuk same-origin lewat nginx relatif; isi origin hanya jika API di domain terpisah |
 | `ALLOW_ANONYMOUS` | No | `true`/`false` - allow unauthenticated conversions |
 | `RATE_LIMIT_PER_MINUTE` | No | API rate limit per IP |
 | `MAX_UPLOAD_MB` | No | Max file upload size |
@@ -162,7 +162,7 @@ docker compose logs -f frontend
 docker compose logs -f nginx
 
 # Health check
-curl https://yourdomain.com/api/v1/health
+curl https://xconvert.com/api/v1/health
 ```
 
 ## Backup & Restore
@@ -199,7 +199,7 @@ docker compose logs certbot
 
 # Force renewal
 docker compose run --rm --entrypoint certbot certbot certonly --webroot \
-  -w /var/www/certbot --force-renewal -d yourdomain.com
+  -w /var/www/certbot --force-renewal -d xconvert.com
 docker compose exec nginx nginx -s reload
 ```
 

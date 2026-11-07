@@ -16,7 +16,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "DocuConvert"
+    app_name: str = "XConvert"
     environment: str = "development"
     api_prefix: str = "/api/v1"
 
@@ -38,10 +38,10 @@ class Settings(BaseSettings):
     allow_anonymous: bool = True
     rate_limit_per_minute: int = 60
 
-    # Performance tuning. Bigger pools help parallel batches but each busy
-    # conversion is CPU-bound, so more workers than cores just adds context
-    # switching. Tune after profiling on real hardware.
-    conversion_workers: int = 2
+    # Performance tuning. CPU-bound conversions run in a process pool (real
+    # parallelism across cores); subprocess tools (LibreOffice/Word) keep the
+    # thread pool. ``0`` means auto: one worker less than the core count.
+    conversion_workers: int = 0
     max_concurrent_uploads: int = 3
     zip_compression_level: int = 6
     result_cache_hours: int = 6

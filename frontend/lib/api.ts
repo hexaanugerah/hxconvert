@@ -1,6 +1,27 @@
 import type { ApiErrorBody } from "@/types";
 
-export const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+function resolveApiUrl(): string {
+  const configured = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
+  if (typeof window === "undefined") return configured;
+  try {
+    const target = new URL(configured);
+    const pageHost = window.location.hostname;
+    const isLocalHost = (host: string) =>
+      host === "localhost" || host === "127.0.0.1" || host === "::1";
+    // Keep the browser -> API pairing same-site so the guest cookie stays a
+    // first-party cookie. localhost:3000 -> 127.0.0.1:8000 is cross-site in
+    // SameSite terms and cookies would not be sent back for the job polling.
+    if (target.hostname !== pageHost && isLocalHost(target.hostname) && isLocalHost(pageHost)) {
+      target.hostname = pageHost;
+      return target.toString().replace(/\/+$/, "");
+    }
+  } catch {
+    // malformed URL: fall through and use the configured value as-is
+  }
+  return configured;
+}
+
+export const API_URL = resolveApiUrl();
 const TOKEN_KEY = "docuconvert.token";
 
 export class ApiError extends Error {
@@ -57,7 +78,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     });
   } catch {
     throw new ApiError(
-      "Tidak dapat terhubung ke server DocuConvert. Pastikan backend berjalan dan URL API benar.",
+      "Tidak dapat terhubung ke server XConvert. Pastikan backend berjalan dan URL API benar.",
       0,
       "network_error",
     );

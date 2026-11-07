@@ -12,7 +12,6 @@ from datetime import timedelta
 import json
 import logging
 import shutil
-import time
 
 from sqlalchemy import select
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import atexit
-import importlib.util
 import itertools
 import json
 import os
@@ -33,7 +32,7 @@ from docx.oxml.ns import qn
 
 from app.core.config import BACKEND_DIR, settings
 from app.core.errors import ConversionError
-from app.services.capabilities import find_winword, word_available
+from app.services.capabilities import word_available
 from app.services.office_ops import _shard_indices, _session_count
 
 logger = logging.getLogger("docuconvert.word")
@@ -528,7 +527,6 @@ def convert_with_word_pool(
         return None
     _last_word_activity = time.monotonic()
     Path(workdir).mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
     try:
         pool = _ensure_word_pool()
     except ConversionError as exc:

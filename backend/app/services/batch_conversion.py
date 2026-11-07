@@ -1,16 +1,22 @@
 """Batch conversion service for processing multiple files and creating ZIP archives."""
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
+import threading
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    BrokenExecutor,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+)
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from dataclasses import dataclass, field
 
 from app.core.config import settings
-from app.core.errors import ConversionError
 from app.core.storage import job_output_dir, sanitize_filename
 from app.services.base import ConversionContext, ConversionResult
 from app.services.registry import get_tool, ToolSpec
@@ -26,6 +32,15 @@ DEFINED_EXTENSIONS = {".txt", ".csv", ".md", ".markdown", ".html", ".htm", ".xml
 # Tools whose single-file result is a ZIP that contains many outputs. In a
 # batch these are expanded into one subfolder per source file.
 MULTI_OUTPUT_TOOLS = {"pdf-to-images", "split-pdf", "pptx-to-images", "xlsx-to-csv"}
+
+# Tools whose handler runs an external application (LibreOffice/Word). Their
+# heavy work already happens in separate OS processes, so a CPU process pool
+# adds spawn overhead for nothing. Every other handler is CPU-bound inside
+# Python and only benefits from real process parallelism (threads are limited
+# by the GIL for conversions like PDF -> Word).
+SUBPROCESS_TOOL_IDS = frozenset(
+    {"docx-to-pdf", "xlsx-to-pdf", "pptx-to-pdf", "pptx-to-images"}
+)
 
 
 @dataclass
@@ -57,9 +72,67 @@ class BatchConversionResult:
 
 def _worker_count() -> int:
     """Bounded pool: an idle pool wastes nothing, and running every file at
-    once only slows down CPU-bound converters through context switching."""
-    configured = max(1, int(settings.conversion_workers or 1))
+    once only slows down CPU-bound converters through context switching.
+
+    ``settings.conversion_workers <= 0`` means auto: one worker less than the
+    core count, which keeps the machine responsive while using all of them.
+    """
+    configured = int(settings.conversion_workers or 0)
+    if configured <= 0:
+        # Auto: use the cores but cap the pool so heavy 300 DPI renders per
+        # worker cannot exhaust RAM on machines with many small cores.
+        return max(1, min(6, (os.cpu_count() or 2) - 1))
     return max(1, min(configured, os.cpu_count() or 2))
+
+
+# A persistent process pool for CPU-bound conversions. Spawning a fresh pool
+# per batch costs seconds on Windows (every worker re-imports PyMuPDF and
+# friends), so the pool is created once and reused across jobs.
+_CPU_POOL: ProcessPoolExecutor | None = None
+_CPU_POOL_LOCK = threading.Lock()
+
+
+def _pool_init() -> None:
+    """Pre-import the heavy conversion libraries in each pool worker so the
+    first file of a batch does not pay their import cost."""
+    import docx  # noqa: F401
+    import fitz  # noqa: F401
+    from PIL import Image  # noqa: F401
+
+
+def _cpu_pool(workers: int) -> ProcessPoolExecutor:
+    """Return the lazily created process pool, recreating it after a crash."""
+    global _CPU_POOL
+    with _CPU_POOL_LOCK:
+        if _CPU_POOL is None:
+            _CPU_POOL = ProcessPoolExecutor(
+                max_workers=workers, initializer=_pool_init
+            )
+        return _CPU_POOL
+
+
+def _drop_cpu_pool() -> None:
+    """Forget the process pool so a new one is created for the next batch."""
+    global _CPU_POOL
+    with _CPU_POOL_LOCK:
+        if _CPU_POOL is not None:
+            try:
+                _CPU_POOL.shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001 - shutdown may already be broken
+                pass
+            _CPU_POOL = None
+
+
+def _hash_file(path: Path) -> str | None:
+    """SHA-256 of a file streamed in chunks; ``None`` if it cannot be read."""
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 def _zip_method(ext: str) -> tuple[int, int]:
@@ -147,7 +220,7 @@ def create_batch_zip(
         Tuple of (zip_path, zip_filename)
     """
     output_dir = job_output_dir(batch_id)
-    zip_filename = "DocuConvert_Results_{start}.zip".format(start=batch_id[:8])
+    zip_filename = "XConvert_Results_{start}.zip".format(start=batch_id[:8])
     zip_path = output_dir / zip_filename
 
     used_files: dict[str, int] = {}
@@ -199,7 +272,7 @@ def create_batch_zip(
         warned = [result for result in file_results if result.warnings]
         if failed or warned:
             report_lines = [
-                "Laporan Konversi Batch DocuConvert",
+                "Laporan Konversi Batch XConvert",
                 f"ID Batch: {batch_id}",
                 f"Alat: {tool.label} ({tool.id})",
                 f"Total berkas: {len(file_results)}",
@@ -298,6 +371,96 @@ def _convert_one(
         )
 
 
+def _convert_indices(
+    batch_id: str,
+    indices: list[int],
+    input_files: list[Path],
+    original_names: list[str],
+    tool: ToolSpec,
+    options: dict[str, Any],
+    workdir: Path,
+    workers: int,
+) -> dict[int, BatchFileResult]:
+    """Convert the given indices; parallel when there is more than one.
+
+    Process pool for handlers that are CPU-bound in Python (the GIL keeps
+    threads serial there); the thread fallback remains for subprocess tools
+    and for recovering whatever a broken process pool could not finish.
+    """
+    results: dict[int, BatchFileResult] = {}
+    if not indices:
+        return results
+
+    def inline(missing: list[int]) -> None:
+        for index in missing:
+            results[index] = _convert_one(
+                index,
+                input_files[index],
+                original_names[index],
+                tool,
+                options,
+                workdir,
+            )
+
+    if len(indices) == 1 or workers == 1:
+        inline(indices)
+        return results
+
+    if tool.id not in SUBPROCESS_TOOL_IDS:
+        try:
+            pool = _cpu_pool(workers)
+        except Exception:  # noqa: BLE001 - e.g. unpicklable options: use threads
+            pool = None
+        if pool is not None:
+            futures: dict[Any, int] = {}
+            try:
+                for index in indices:
+                    future = pool.submit(
+                        _convert_one,
+                        index,
+                        input_files[index],
+                        original_names[index],
+                        tool,
+                        options,
+                        workdir,
+                    )
+                    futures[future] = index
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        results[index] = future.result()
+                    except Exception:  # noqa: BLE001 - worker died: retry inline
+                        continue
+            except BrokenExecutor:
+                # A worker crashed mid-flight: rebuild the pool for the next
+                # batch and let the thread fallback finish these files.
+                _drop_cpu_pool()
+            missing = [index for index in indices if index not in results]
+            inline(missing)
+            return results
+
+    with ThreadPoolExecutor(
+        max_workers=min(workers, len(indices)),
+        thread_name_prefix=f"batch-{batch_id[:8]}",
+    ) as pool:
+        futures = {
+            pool.submit(
+                _convert_one,
+                index,
+                input_files[index],
+                original_names[index],
+                tool,
+                options,
+                workdir,
+            ): index
+            for index in indices
+        }
+        for future in as_completed(futures):
+            batch_result = future.result()
+            results[batch_result.index] = batch_result
+    return results
+
+
 def process_batch_conversion(
     batch_id: str,
     tool_id: str,
@@ -347,37 +510,64 @@ def process_batch_conversion(
             )
             pending.remove(index)
 
-    if pending:
-        if len(pending) == 1 or workers == 1:
-            for index in pending:
-                file_results[index] = _convert_one(
-                    index,
-                    input_files[index],
-                    original_names[index],
-                    tool,
-                    options,
-                    workdir,
-                )
+    duplicate_rep: dict[int, int] = {}
+    if len(pending) > 1:
+        # Identical files are converted once and their results reused. Uploading
+        # the same document several times in one job must not pay for the work
+        # more than once (hashing is streamed and far cheaper than converting).
+        seen_digests: dict[str, int] = {}
+        for index in pending:
+            digest = _hash_file(input_files[index])
+            if digest is None:
+                continue
+            first_index = seen_digests.setdefault(digest, index)
+            if first_index != index:
+                duplicate_rep[index] = first_index
+
+    representatives = [index for index in pending if index not in duplicate_rep]
+    clones = [index for index in pending if index in duplicate_rep]
+
+    converted_results = _convert_indices(
+        batch_id,
+        representatives,
+        input_files,
+        original_names,
+        tool,
+        options,
+        workdir,
+        workers,
+    )
+    for index, batch_result in converted_results.items():
+        file_results[index] = batch_result
+
+    for clone in clones:
+        rep = duplicate_rep[clone]
+        rep_result = file_results[rep]
+        if (
+            rep_result is not None
+            and rep_result.success
+            and rep_result.output_path
+            and rep_result.output_path.exists()
+        ):
+            file_results[clone] = BatchFileResult(
+                index=clone,
+                original_name=original_names[clone],
+                success=True,
+                output_path=rep_result.output_path,
+                output_filename=rep_result.output_filename,
+                output_mime=rep_result.output_mime,
+                warnings=rep_result.warnings,
+            )
         else:
-            with ThreadPoolExecutor(
-                max_workers=min(workers, len(pending)),
-                thread_name_prefix=f"batch-{batch_id[:8]}",
-            ) as pool:
-                futures = {
-                    pool.submit(
-                        _convert_one,
-                        index,
-                        input_files[index],
-                        original_names[index],
-                        tool,
-                        options,
-                        workdir,
-                    ): index
-                    for index in pending
-                }
-                for future in as_completed(futures):
-                    batch_result = future.result()
-                    file_results[batch_result.index] = batch_result
+            file_results[clone] = BatchFileResult(
+                index=clone,
+                original_name=original_names[clone],
+                success=False,
+                error_message=(
+                    "Berkas identik dengan berkas lain dalam batch ini yang "
+                    "juga gagal dikonversi."
+                ),
+            )
 
     file_results = [
         result

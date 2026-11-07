@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { Logo } from "@/components/logo";
 
-const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
 
 export function SiteFooter() {
   return (
@@ -11,7 +11,7 @@ export function SiteFooter() {
         <div className="md:col-span-2">
           <Logo />
           <p className="mt-4 max-w-sm text-sm leading-relaxed text-muted-foreground">
-            DocuConvert mengubah PDF, Word, Excel, PowerPoint, dan gambar langsung di server Anda sendiri.
+            XConvert mengubah PDF, Word, Excel, PowerPoint, dan gambar langsung di server Anda sendiri.
             Dokumen hasil konversi dihapus otomatis sesuai masa penyimpanan.
           </p>
         </div>
@@ -34,7 +34,7 @@ export function SiteFooter() {
       </div>
       <div className="border-t">
         <div className="container flex flex-col items-center justify-between gap-2 py-5 text-xs text-muted-foreground sm:flex-row">
-          <p>© {new Date().getFullYear()} DocuConvert. Semua dokumen tetap milik Anda.</p>
+          <p>© {new Date().getFullYear()} XConvert. Semua dokumen tetap milik Anda.</p>
           <p>Dibuat dengan Next.js, FastAPI, dan pustaka konversi sumber terbuka.</p>
         </div>
       </div>
