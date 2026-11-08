@@ -1,0 +1,41 @@
+# Override untuk ujicoba tanpa domain (HTTP saja), misalnya lewat Cloudflare Tunnel.
+#
+# Pakai bersama compose utama:
+#   docker compose -f docker-compose.yml -f docker-compose.preview.yml up -d --build
+#
+# Lalu buka tunnel:
+#   cloudflared tunnel --url http://localhost:80
+#
+# Minimal isi .env di root proyek (compose membaca .env otomatis):
+#   POSTGRES_PASSWORD=<password acak>
+#   SECRET_KEY=<python -c "import secrets; print(secrets.token_urlsafe(48))">
+#
+# Catatan:
+# - Frontend dibangun dengan NEXT_PUBLIC_API_URL kosong, jadi semua permintaan /api
+#   bersifat same-origin lewat nginx (cookie sesi tamu tetap bekerja).
+# - Cloudflare Quick Tunnel (gratis) membatasi body request ~100 MB. Turunkan
+#   MAX_UPLOAD_MB (mis. 95) di .env bila memakai quick tunnel.
+# - Gambar di-publish hanya di port 80; certbot tidak dijalankan.
+# - Tag !override pada ports membutuhkan Docker Compose 2.24+ (Compose v2 terbaru).
+
+name: docuconvert
+
+volumes:
+  # Volume terpisah agar ujicoba tidak memakai/menimpa database lokal yang lama.
+  postgres_preview_data:
+
+services:
+  postgres:
+    volumes:
+      - postgres_preview_data:/var/lib/postgresql/data
+
+  nginx:
+    # preview.conf adalah konfigurasi nginx lengkap (events/http) tanpa TLS.
+    volumes:
+      - ./nginx/preview.conf:/etc/nginx/nginx.conf:ro
+    ports: !override
+      - "80:80"
+
+  # Hanya dibutuhkan untuk deploy dengan domain + Let's Encrypt.
+  certbot:
+    profiles: ["tls"]

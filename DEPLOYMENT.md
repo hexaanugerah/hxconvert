@@ -14,6 +14,16 @@ docker compose -f docker-compose.dev.yml up --build
 
 ## Production Deployment
 
+### Free trial options
+
+- **Oracle Cloud Always Free (ARM VM, full stack):** step-by-step in
+  [`docs/DEPLOY_ORACLE_FREE.md`](docs/DEPLOY_ORACLE_FREE.md).
+- **No domain / Cloudflare Tunnel:**
+  `docker compose -f docker-compose.yml -f docker-compose.preview.yml up -d --build`
+  (see the comments in `docker-compose.preview.yml`).
+- **Render Free (limited demo, no LibreOffice/OCR):** deploy the Blueprint in
+  `render.yaml` (image: `render/Dockerfile`).
+
 ### Option 1: VPS with Docker Compose (Recommended)
 
 **Requirements:**

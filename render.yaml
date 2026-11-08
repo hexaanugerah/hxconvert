@@ -1,0 +1,52 @@
+# Blueprint Render Free untuk demo terbatas HXconvertX.
+#
+# Satu web service Docker: nginx + Next.js + FastAPI (lihat render/Dockerfile).
+# LibreOffice dan OCR tidak tersedia, jadi sebagian alat ditandai "tidak
+# tersedia" di UI dan DOCX/XLSX -> PDF memakai fallback HTML.
+#
+# Deploy: Render Dashboard -> New -> Blueprint -> pilih repo ini.
+
+services:
+  - type: web
+    name: hxconvert-demo
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./render/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/health
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      # SQLite di disk ephemeral: data hilang saat spin-down/redeploy.
+      - key: DATABASE_URL
+        value: sqlite:////app/storage/docuconvert.db
+      - key: STORAGE_DIR
+        value: /app/storage
+      - key: ALLOW_ANONYMOUS
+        value: "true"
+      - key: MAX_UPLOAD_MB
+        value: "25"
+      - key: MAX_FILES_PER_JOB
+        value: "3"
+      - key: MAX_BATCH_SIZE_MB
+        value: "60"
+      # 0 = auto (jumlah core host), bisa memicu banyak proses di instance 0.1 CPU.
+      - key: CONVERSION_WORKERS
+        value: "1"
+      - key: PREVIEW_MAX_PAGES
+        value: "10"
+      - key: RESULT_TTL_HOURS
+        value: "2"
+      - key: CONVERSION_TIMEOUT_SECONDS
+        value: "300"
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "20"
+      # Tidak dipakai untuk permintaan same-origin, tetapi harus berupa origin
+      # nyata (bukan "*") karena cookie dikirim dengan credentials.
+      - key: CORS_ORIGINS
+        value: https://hxconvert-demo.onrender.com
