@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+from typing import Any
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -103,75 +104,195 @@ def _section_page_css(document: Document) -> tuple[str, list[str]]:
     return css, warnings
 
 
+ENGINES = ("auto", "libreoffice", "python", "word")
+
+# A unique paragraph text that survives DOCX -> HTML conversion and is replaced
+# by an explicit page break. This is how the Python renderer keeps the author's
+# pagination instead of letting content reflow freely.
+PAGE_BREAK_SENTINEL = "HXCONVERTPAGEBREAK"
+
+
+def _engine(ctx: ConversionContext) -> str:
+    """Which renderer the user asked for (unknown values fall back to auto)."""
+    value = str(ctx.options.get("engine", "auto") or "auto").strip().lower()
+    return value if value in ENGINES else "auto"
+
+
+def _prepare_html_source(source: Path, destination: Path) -> tuple[Path, int]:
+    """Copy the DOCX with a marker paragraph before every explicit page break.
+
+    Mammoth has no notion of page breaks, so the breaks are marked in a copy of
+    the document and turned into CSS page breaks afterwards. The original file
+    is left untouched, and documents without explicit breaks are used as-is.
+    """
+    from docx.oxml import OxmlElement
+
+    document = _open_docx(source)
+    markings: list[tuple[Any, bool]] = []  # (paragraph, marker goes before?)
+    for paragraph in document.paragraphs:
+        try:
+            if paragraph.paragraph_format.page_break_before:
+                markings.append((paragraph, True))
+                continue
+        except Exception:  # pragma: no cover - malformed style
+            pass
+        try:
+            has_break = bool(paragraph._p.xpath('.//w:br[@w:type="page"]'))
+        except Exception:  # pragma: no cover - malformed XML
+            continue
+        # A page-break run is almost always the last thing in its paragraph (or
+        # its own paragraph), so the break belongs *after* it. Mid-paragraph
+        # breaks are approximated by breaking after the whole paragraph.
+        if has_break:
+            markings.append((paragraph, False))
+    if not markings:
+        return source, 0
+
+    for paragraph, before in markings:
+        try:
+            if before:
+                paragraph.insert_paragraph_before(PAGE_BREAK_SENTINEL)
+            else:
+                marker = OxmlElement("w:p")
+                run = OxmlElement("w:r")
+                text = OxmlElement("w:t")
+                text.text = PAGE_BREAK_SENTINEL
+                run.append(text)
+                marker.append(run)
+                paragraph._p.addnext(marker)
+        except Exception:  # pragma: no cover - malformed document body
+            continue
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    document.save(destination)
+    return destination, len(markings)
+
+
+def _python_renderer_css(document: Document) -> str:
+    """Consistent typography taken from the document's own Normal style."""
+    family = "Helvetica, Arial, sans-serif"
+    size = 10.5
+    try:
+        normal = document.styles["Normal"]
+        name = normal.font.name
+        if name:
+            family = f"'{name}', Helvetica, Arial, sans-serif"
+        if normal.font.size:
+            size = round(float(normal.font.size.pt), 1)
+    except Exception:  # pragma: no cover - unusual template
+        pass
+    return (
+        f"body {{ font-family: {family}; font-size: {size}pt; }}"
+        "table { border: 0.6pt solid #94a3b8; }"
+        "th, td { border: 0.6pt solid #94a3b8; }"
+    )
+
+
+def _convert_with_python(
+    ctx: ConversionContext,
+    document: Document,
+    stem: str,
+    warnings: list[str],
+) -> ConversionResult:
+    """Deterministic DOCX -> PDF that needs neither Word nor LibreOffice.
+
+    The same input produces the same PDF on every server: no COM automation, no
+    installed Word version, no font cache of the host deciding the pagination.
+    """
+    import mammoth
+
+    source, break_count = _prepare_html_source(
+        ctx.input, ctx.workdir / "_docx_html_source.docx"
+    )
+    try:
+        with source.open("rb") as handle:
+            result = mammoth.convert_to_html(handle)
+    except Exception as exc:
+        raise ConversionError("The Word document could not be converted.") from exc
+
+    body = result.value
+    if break_count:
+        body = body.replace(
+            f"<p>{PAGE_BREAK_SENTINEL}</p>",
+            '<div style="page-break-before: always;"></div>',
+        )
+
+    page_css, section_warnings = _section_page_css(document)
+    warnings.extend(section_warnings)
+    warnings.append(
+        "Renderer Python dipakai: hasil konsisten di semua server tanpa otomasi Word "
+        "atau LibreOffice. Ukuran halaman, margin, paragraf, tabel, gambar, dan pemisah "
+        "halaman dipertahankan; header/footer, kolom majalah, dan objek mengambang kompleks "
+        "dapat berbeda dari tampilan di Word."
+    )
+    html = wrap_html(
+        body,
+        stem,
+        page_css=f"{page_css} {_python_renderer_css(document)}",
+    )
+    output = render_html_to_pdf(html, ctx.workdir / "document.pdf")
+    if result.messages:
+        warnings.append("Beberapa fitur Word disederhanakan oleh renderer Python.")
+    return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
+
+
 def docx_to_pdf(ctx: ConversionContext) -> ConversionResult:
     document = _open_docx(ctx.input)  # validates the file
     stem = Path(ctx.original_name).stem or "document"
+    engine = _engine(ctx)
     warnings: list[str] = []
 
-    # Microsoft Word is the reference renderer: pagination, fonts, headers/footers,
-    # tables, images and floating shapes come out exactly as Word lays them out.
-    if word_available():
+    # "auto" is deterministic on purpose: LibreOffice when it is installed, else
+    # the built-in Python renderer. Word COM is never launched implicitly, so a
+    # Windows development machine and a Linux server produce the same document.
+    if engine == "word":
+        if not word_available():
+            raise ConversionError(
+                "Mesin Microsoft Word dipilih, tetapi Word tidak tersedia di server ini."
+            )
         try:
             output = convert_with_word(ctx.input, ctx.workdir)
-            warnings.extend(font_warnings(ctx.input))
-            return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
         except ConversionError as exc:
-            warnings.append(
-                f"Microsoft Word tidak dapat mengekspor dokumen ini ({exc.message}). "
-                "Renderer pengganti dipakai; tata letak dapat berbeda."
-            )
+            raise ConversionError(
+                "Microsoft Word gagal mengekspor dokumen ini. " + (exc.message or "")
+            ) from exc
+        warnings.extend(font_warnings(ctx.input))
+        return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
 
     if libreoffice_available():
         try:
             output = convert_with_soffice(ctx.input, "pdf", ctx.workdir)
             return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
         except ConversionError as exc:
+            if engine == "libreoffice":
+                raise ConversionError(
+                    "LibreOffice gagal mengonversi dokumen ini. " + (exc.message or "")
+                ) from exc
             warnings.append(
                 f"LibreOffice gagal mengonversi dokumen ini ({exc.message}). "
-                "Renderer pengganti dipakai; tata letak dapat berbeda."
+                "Renderer Python dipakai; tata letak dapat berbeda."
             )
+    elif engine == "libreoffice":
+        raise ConversionError(
+            "Mesin LibreOffice dipilih, tetapi LibreOffice tidak tersedia di server ini."
+        )
 
-    import mammoth
-
-    try:
-        with ctx.input.open("rb") as handle:
-            result = mammoth.convert_to_html(handle)
-    except Exception as exc:
-        raise ConversionError("The Word document could not be converted.") from exc
-
-    page_css, section_warnings = _section_page_css(document)
-    warnings.extend(section_warnings)
-    warnings.insert(
-        0,
-        "Microsoft Word dan LibreOffice tidak tersedia, sehingga renderer HTML sederhana "
-        "dipakai. Font, header/footer, kolom, dan objek kompleks dapat berbeda dari aslinya; "
-        "ukuran halaman, orientasi, dan margin tetap diambil dari file Word.",
-    )
-    try:
-        if document.element.body.xpath('.//w:br[@w:type="page"]'):
-            warnings.append(
-                "Dokumen berisi page break eksplisit; renderer HTML hanya mempertahankannya "
-                "bila fitur tersebut didukung oleh konversi Word ke HTML."
-            )
-    except Exception:  # pragma: no cover - malformed XML
-        pass
-    html = wrap_html(result.value, stem, page_css=page_css)
-    output = render_html_to_pdf(html, ctx.workdir / "document.pdf")
-    if result.messages:
-        warnings.append("Some Word features could not be reproduced by the fallback renderer.")
-    return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
+    return _convert_with_python(ctx, document, stem, warnings)
 
 
 def docx_to_pdf_batch(
     contexts: list[ConversionContext],
 ) -> list[ConversionResult | None]:
-    """Batch fast path: export every DOCX with one shared Word session.
+    """Batch fast path: one shared renderer session for many DOCX files.
 
-    Files that Word cannot export are retried in a single LibreOffice
-    invocation before falling back to the per-file handler. ``None`` entries
-    use the normal per-file handler (which may use the HTML fallback).
+    Only an explicitly requested Word engine uses the COM pool. The default
+    path stays on LibreOffice when it is installed, and otherwise returns
+    ``None`` so every file goes through the deterministic Python renderer.
     """
     if len(contexts) < 2:
+        return [None] * len(contexts)
+
+    engine = _engine(contexts[0])
+    if engine == "python":
         return [None] * len(contexts)
 
     for ctx in contexts:
@@ -180,7 +301,7 @@ def docx_to_pdf_batch(
     outputs: list[Path | None] = [None] * len(contexts)
     from_word: list[bool] = [False] * len(contexts)
 
-    if word_available():
+    if engine == "word" and word_available():
         try:
             outcomes = convert_parallel_with_word(jobs, contexts[0].workdir.parent)
         except ConversionError:

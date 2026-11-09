@@ -114,7 +114,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="docx",
         output_filename="converted",
-        max_files=15,
+        max_files=50,
         handler=pdf_to_docx.convert,
         options=(
             ToolOption(
@@ -124,15 +124,32 @@ TOOLS: tuple[ToolSpec, ...] = (
                 default="auto",
                 choices=(
                     {"value": "auto", "label": "Otomatis (Cerdas)"},
+                    {"value": "fast", "label": "Cepat (gambar JPEG, tanpa analisis tata letak)"},
                     {"value": "layout", "label": "Prioritaskan tata letak"},
                     {"value": "editable", "label": "Prioritaskan pengeditan"},
                     {"value": "full-image", "label": "Gambar penuh (tanpa OCR)"},
                 ),
                 help=(
                     "Otomatis: halaman scan jadi gambar, halaman teks jadi teks edit, campuran pakai tata letak. "
+                    "Cepat: setiap halaman dirender jadi JPEG 72 DPI tanpa analisis tata letak; "
+                    "paling cocok untuk batch PDF besar, tetapi teks tidak dapat diedit dan "
+                    "tampilan hanya sekualitas pratinjau. "
                     "Tata letak: pdf2docx mempertahankan posisi teks, gambar, grafik vektor. "
                     "Edit: ekstrak teks sebagai paragraf Word. "
-                    "Gambar penuh: setiap halaman dirender jadi gambar penuh, tanpa OCR/ekstraksi teks."
+                    "Gambar penuh: setiap halaman dirender jadi gambar 300 DPI, tanpa OCR/ekstraksi teks."
+                ),
+            ),
+            ToolOption(
+                name="fast_dpi",
+                label="Resolusi mode cepat (DPI)",
+                type="number",
+                default=72,
+                min=72,
+                max=200,
+                help=(
+                    "Hanya dipakai pada mode Cepat. 72 DPI adalah setelan tercepat "
+                    "(pratinjau layar); naikkan ke 110-150 bila hasil perlu lebih tajam "
+                    "untuk dicetak, dengan waktu konversi yang lebih lama."
                 ),
             ),
             ToolOption(
@@ -162,7 +179,9 @@ TOOLS: tuple[ToolSpec, ...] = (
         ),
         processing_note=(
             "Mode Otomatis: halaman scan tetap gambar, teks digital tetap teks. "
-            "Mode Gambar Penuh: semua halaman jadi gambar, tanpa OCR. "
+            "Mode Cepat: semua halaman jadi JPEG beresolusi rendah tanpa analisis tata letak, "
+            "sehingga batch besar selesai jauh lebih cepat tetapi teks tidak dapat diedit. "
+            "Mode Gambar Penuh: semua halaman jadi gambar 300 DPI, tanpa OCR. "
             "OCR tidak dijalankan otomatis."
         ),
     ),
@@ -174,7 +193,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="xlsx",
         output_filename="tables",
-        max_files=15,
+        max_files=50,
         handler=pdf_to_excel.convert,
         options=(
             ToolOption(
@@ -193,7 +212,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pptx",
         output_filename="presentation",
-        max_files=15,
+        max_files=50,
         handler=pdf_to_pptx.convert,
         options=(
             ToolOption(name="include_images", label="Sertakan gambar halaman", type="checkbox", default=False),
@@ -208,7 +227,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         output="zip",
         output_filename="pages",
         handler=pdf_ops.pdf_to_images,
-        max_files=15,
+        max_files=50,
         options=(
             ToolOption(
                 name="format",
@@ -229,7 +248,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         output="pdf",
         output_filename="images",
         handler=image_ops.images_to_pdf,
-        max_files=15,
+        max_files=50,
         multiple=True,
         options=(
             ToolOption(
@@ -293,7 +312,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=pdf_ops.merge_pdfs,
         multiple=True,
         min_files=2,
-        max_files=15,
+        max_files=50,
     ),
     ToolSpec(
         id="split-pdf",
@@ -303,7 +322,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="zip",
         output_filename="split",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.split_pdf,
         options=(
             ToolOption(
@@ -334,7 +353,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="rotated",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.rotate_pdf,
         options=(
             ToolOption(
@@ -359,7 +378,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="compressed",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.compress_pdf,
     ),
     ToolSpec(
@@ -370,7 +389,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="txt",
         output_filename="text",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.extract_text,
         options=(_LANG_OPTION,),
     ),
@@ -382,7 +401,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="xlsx",
         output_filename="tables",
-        max_files=15,
+        max_files=50,
         handler=pdf_to_excel.convert,
         options=(
             ToolOption(name="text_fallback", label="Ekspor teks jika tidak ada tabel", type="checkbox", default=True),
@@ -396,7 +415,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="numbered",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.add_page_numbers,
         options=(
             ToolOption(
@@ -433,7 +452,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="watermarked",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.add_watermark,
         options=(
             ToolOption(name="text", label="Teks tanda air", type="text", default="CONFIDENTIAL", placeholder="CONFIDENTIAL"),
@@ -449,7 +468,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="removed-pages",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.remove_pages,
         options=(
             ToolOption(name="pages", label="Halaman yang dihapus", type="text", default="", placeholder="2,4-6"),
@@ -463,7 +482,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="reordered",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.reorder_pdf,
         options=(
             ToolOption(name="order", label="Urutan halaman", type="text", default="", placeholder="3,1,2"),
@@ -477,7 +496,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="extracted-pages",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.extract_pages,
         options=(
             ToolOption(
@@ -498,7 +517,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="cropped",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.crop_pages,
         options=(
             ToolOption(name="top", label="Potong atas (%)", type="number", default=0, min=0, max=45),
@@ -516,7 +535,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="resized",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.resize_pages,
         options=(
             ToolOption(
@@ -561,7 +580,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="optimized",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.optimize_pdf,
         options=(
             ToolOption(
@@ -591,7 +610,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="repaired",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.repair_pdf,
     ),
     ToolSpec(
@@ -602,7 +621,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="protected",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.protect_pdf,
         options=(
             ToolOption(
@@ -635,7 +654,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="pdf",
         output_filename="unlocked",
-        max_files=15,
+        max_files=50,
         handler=pdf_ops.unlock_pdf,
         options=(
             ToolOption(
@@ -719,16 +738,41 @@ TOOLS: tuple[ToolSpec, ...] = (
         id="docx-to-pdf",
         label="Word ke PDF",
         description=(
-            "Ubah DOCX menjadi PDF dengan mempertahankan tata letak. Microsoft Word atau "
-            "LibreOffice dipakai bila tersedia."
+            "Ubah DOCX menjadi PDF dengan mempertahankan ukuran halaman, margin, tabel, "
+            "gambar, dan pemisah halaman. LibreOffice dipakai bila tersedia, dengan "
+            "renderer Python deterministik sebagai fallback."
         ),
         category="word",
         inputs=(".docx",),
         output="pdf",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=docx_ops.docx_to_pdf,
         batch_handler=docx_ops.docx_to_pdf_batch,
+        options=(
+            ToolOption(
+                name="engine",
+                label="Mesin konversi",
+                type="select",
+                default="auto",
+                choices=(
+                    {"value": "auto", "label": "Otomatis (LibreOffice, lalu renderer Python)"},
+                    {"value": "libreoffice", "label": "LibreOffice"},
+                    {"value": "python", "label": "Renderer Python (deterministik)"},
+                    {"value": "word", "label": "Microsoft Word (khusus Windows)"},
+                ),
+                help=(
+                    "Otomatis tidak menjalankan otomasi Microsoft Word, sehingga hasilnya "
+                    "sama di server Windows maupun Linux. Pilih Word hanya bila server "
+                    "memiliki Word dan Anda memerlukan hasil yang paling mirip aslinya."
+                ),
+            ),
+        ),
+        processing_note=(
+            "Default tidak memakai otomasi Word: LibreOffice digunakan bila terpasang, "
+            "selain itu renderer Python yang deterministik. Header/footer, kolom, dan "
+            "objek mengambang kompleks dapat berbeda dari tampilan di Word."
+        ),
     ),
     ToolSpec(
         id="docx-to-txt",
@@ -738,7 +782,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".docx",),
         output="txt",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=docx_ops.docx_to_txt,
     ),
     ToolSpec(
@@ -749,7 +793,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".docx",),
         output="html",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=docx_ops.docx_to_html,
     ),
     ToolSpec(
@@ -760,7 +804,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".docx",),
         output="md",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=docx_ops.docx_to_markdown,
     ),
     ToolSpec(
@@ -771,7 +815,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".txt",),
         output="docx",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=docx_ops.txt_to_docx,
     ),
     ToolSpec(
@@ -782,7 +826,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".md", ".markdown"),
         output="docx",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=docx_ops.markdown_to_docx,
     ),
     ToolSpec(
@@ -796,7 +840,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=docx_ops.merge_docx,
         multiple=True,
         min_files=2,
-        max_files=15,
+        max_files=50,
     ),
     ToolSpec(
         id="clean-docx",
@@ -806,7 +850,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".docx",),
         output="docx",
         output_filename="cleaned",
-        max_files=15,
+        max_files=50,
         handler=docx_ops.clean_docx,
         options=(
             ToolOption(name="font", label="Font isi", type="text", default="Calibri"),
@@ -822,7 +866,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".xlsx",),
         output="pdf",
         output_filename="spreadsheet",
-        max_files=15,
+        max_files=50,
         handler=excel_ops.xlsx_to_pdf,
         batch_handler=excel_ops.xlsx_to_pdf_batch,
     ),
@@ -834,7 +878,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".xlsx",),
         output="csv",
         output_filename="sheet",
-        max_files=15,
+        max_files=50,
         handler=excel_ops.xlsx_to_csv,
         options=(
             ToolOption(
@@ -858,7 +902,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".csv",),
         output="xlsx",
         output_filename="spreadsheet",
-        max_files=15,
+        max_files=50,
         handler=excel_ops.csv_to_xlsx,
         options=(
             ToolOption(
@@ -883,7 +927,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".xlsx",),
         output="html",
         output_filename="spreadsheet",
-        max_files=15,
+        max_files=50,
         handler=excel_ops.xlsx_to_html,
     ),
     # ------------------------------- PowerPoint
@@ -895,7 +939,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pptx",),
         output="pdf",
         output_filename="presentation",
-        max_files=15,
+        max_files=50,
         handler=pptx_ops.pptx_to_pdf,
         batch_handler=pptx_ops.pptx_to_pdf_batch,
         requires="libreoffice",
@@ -908,7 +952,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pptx",),
         output="zip",
         output_filename="slides",
-        max_files=15,
+        max_files=50,
         handler=pptx_ops.pptx_to_images,
         batch_handler=pptx_ops.pptx_to_images_batch,
         requires="libreoffice",
@@ -925,7 +969,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"),
         output="image",
         output_filename="image",
-        max_files=15,
+        max_files=50,
         handler=image_ops.convert_image,
         options=(
             ToolOption(
@@ -950,7 +994,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"),
         output="txt",
         output_filename="ocr-text",
-        max_files=15,
+        max_files=50,
         handler=image_ops.image_to_text,
         requires="ocr",
         options=(
@@ -978,7 +1022,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"),
         output="image",
         output_filename="compressed",
-        max_files=15,
+        max_files=50,
         handler=image_ops.compress_image,
         options=(
             ToolOption(
@@ -1012,7 +1056,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"),
         output="image",
         output_filename="resized",
-        max_files=15,
+        max_files=50,
         handler=image_ops.resize_image,
         options=(
             ToolOption(
@@ -1068,7 +1112,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"),
         output="image",
         output_filename="rotated",
-        max_files=15,
+        max_files=50,
         handler=image_ops.rotate_image,
         options=(
             ToolOption(
@@ -1092,7 +1136,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".pdf",),
         output="docx",
         output_filename="ocr-document",
-        max_files=15,
+        max_files=50,
         handler=pdf_to_docx.convert_ocr,
         requires="ocr",
         options=(_LANG_OPTION,),
@@ -1107,7 +1151,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".html", ".htm"),
         output="pdf",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=html_ops.html_file_to_pdf,
     ),
     ToolSpec(
@@ -1118,7 +1162,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".txt",),
         output="pdf",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=html_ops.text_to_pdf,
     ),
     ToolSpec(
@@ -1129,7 +1173,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         inputs=(".md", ".markdown"),
         output="pdf",
         output_filename="document",
-        max_files=15,
+        max_files=50,
         handler=html_ops.markdown_to_pdf,
     ),
 )

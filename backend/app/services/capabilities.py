@@ -182,7 +182,10 @@ def capabilities_snapshot() -> dict:
         "microsoft_word": {
             "available": word_available(),
             "path": find_winword(),
-            "used_for": ["docx -> PDF (highest fidelity, reference renderer)"],
+            "used_for": [
+                "docx -> PDF only when engine=word is requested "
+                "(highest fidelity, opt-in; not used by default)"
+            ],
         },
         "ocr": {
             "available": engine is not None,

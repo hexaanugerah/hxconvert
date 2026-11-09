@@ -26,6 +26,29 @@ def _download(client, job):
     return response.content
 
 
+def test_pdf_to_word_fast_mode_uses_one_jpeg_per_page(client):
+    """Fast mode trades editability for speed: every page becomes a JPEG."""
+    from docx import Document
+
+    job = _completed(
+        client,
+        upload(
+            client,
+            "pdf-to-word",
+            [("report.pdf", make_pdf(pages=3))],
+            options={"mode": "fast", "fast_dpi": 72},
+        ),
+    )
+    content = _download(client, job)
+    document = Document(io.BytesIO(content))
+    assert len(document.inline_shapes) == 3
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        media = [name for name in archive.namelist() if name.startswith("word/media/")]
+    assert len(media) == 3
+    assert all(name.endswith(".jpeg") or name.endswith(".jpg") for name in media)
+    assert any("Mode cepat" in warning for warning in job["warnings"])
+
+
 def test_pdf_to_word_produces_editable_document(client):
     from docx import Document
 

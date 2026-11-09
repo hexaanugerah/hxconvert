@@ -19,6 +19,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { FastModeNotice } from "@/components/fast-mode-notice";
 import { ImagePreviewGrid } from "@/components/image-preview";
 import { JobStatusBadge } from "@/components/job-status-badge";
 import { PdfPreview } from "@/components/pdf-preview";
@@ -102,7 +103,7 @@ export function Converter({ toolId }: { toolId: string }) {
   const [jobId, setJobId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
-  const [showPreview, setShowPreview] = useState(true);
+  const [showPreview, setShowPreview] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const notified = useRef<string | null>(null);
 
@@ -124,7 +125,7 @@ export function Converter({ toolId }: { toolId: string }) {
     queryKey: ["conversion", jobId],
     queryFn: () => getJob(jobId as string),
     enabled: Boolean(jobId),
-    refetchInterval: (query) => (terminal(query.state.data?.status) ? false : 1500),
+    refetchInterval: (query) => (terminal(query.state.data?.status) ? false : 500),
   });
 
   const job = jobQuery.data;
@@ -254,6 +255,10 @@ export function Converter({ toolId }: { toolId: string }) {
     [files],
   );
   const previewableFiles = pdfFiles.length + imageFiles.length;
+  const totalSize = useMemo(
+    () => files.reduce((sum, file) => sum + file.size, 0),
+    [files],
+  );
   const sourcePageSize = useMemo(() => {
     if (!job?.pages.length) return null;
     const first = describePageSize(job.pages[0]);
@@ -305,7 +310,7 @@ export function Converter({ toolId }: { toolId: string }) {
   }
 
   return (
-    <div className="container max-w-6xl py-8 sm:py-10">
+    <div className="container max-w-6xl pt-8 pb-28 sm:pt-10 lg:pb-10">
       <Link href="/tools" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft className="h-4 w-4" /> Semua alat
       </Link>
@@ -355,18 +360,17 @@ export function Converter({ toolId }: { toolId: string }) {
                 maxFiles={tool.max_files}
                 maxSizeMb={maxUploadMb}
                 disabled={!tool.available || busy}
-              />
-              {previewableFiles > 0 && (
-                <div className="mt-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-xs font-medium text-muted-foreground">
-                      Pratinjau berkas ({previewableFiles})
-                    </p>
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setShowPreview((value) => !value)}>
-                      {showPreview ? "Sembunyikan" : "Tampilkan"}
-                    </Button>
-                  </div>
-                  {showPreview && (
+              />                  {previewableFiles > 0 && (
+                    <div className="mt-2">
+                      <div className="mb-1 flex items-center justify-between">
+                        <p className="text-xs text-muted-foreground">
+                          Pratinjau halaman ({previewableFiles})
+                        </p>
+                        <Button type="button" variant="ghost" size="sm" onClick={() => setShowPreview((value) => !value)}>
+                          {showPreview ? "Sembunyikan" : "Tampilkan"}
+                        </Button>
+                      </div>
+                      {showPreview && (
                     <div className="space-y-3">
                       {pdfFiles.slice(0, 1).map((file) => (
                         <PdfPreview key={`${file.name}-${file.size}-${file.lastModified}`} file={file} />
@@ -405,25 +409,48 @@ export function Converter({ toolId }: { toolId: string }) {
                     />
                   ))}
                 </div>
+                {tool.id === "pdf-to-word" && (
+                  <FastModeNotice visible={options.mode === "fast"} dpi={options.fast_dpi} />
+                )}
               </CardContent>
             </Card>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-3">
+          <form
+            onSubmit={handleSubmit}
+            className={cn(
+              "fixed inset-x-3 bottom-3 z-30 space-y-2 rounded-xl border bg-background/95 p-2.5 shadow-lg backdrop-blur sm:p-3 lg:sticky lg:inset-x-auto lg:bottom-3 lg:z-20 lg:shadow-md",
+              // Once a job finished, the status card owns the next actions, so the
+              // bottom bar would only cover the result on small screens.
+              terminal(job?.status) && "hidden lg:block",
+            )}
+          >
             {formError && (
-              <div role="alert" className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+              <div role="alert" className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 text-sm text-destructive">
                 <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>{formError}</span>
               </div>
             )}
-            <div className="flex flex-wrap items-center gap-3">
-              <Button type="submit" size="lg" disabled={!tool.available || busy || files.length === 0}>
+            <div className="flex flex-wrap items-center gap-2 sm:justify-between sm:gap-3">
+              <div className="min-w-0 flex-1 text-xs text-muted-foreground">
+                <p className="truncate font-medium text-foreground">
+                  {files.length > 0
+                    ? `${files.length} berkas siap · ${formatBytes(totalSize)}`
+                    : "Belum ada berkas"}
+                </p>
+                <p className="hidden truncate sm:block">
+                  hasil maks. {formatsQuery.data?.capabilities.limits.result_ttl_hours ?? 24} jam
+                </p>
+              </div>
+              <Button
+                type="submit"
+                size="lg"
+                className="w-full sm:w-auto"
+                disabled={!tool.available || busy || files.length === 0}
+              >
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 {busy ? "Memproses…" : `Konversi ke ${tool.output.toUpperCase()}`}
               </Button>
-              <p className="text-xs text-muted-foreground">
-                Hasil tersedia maksimal {formatsQuery.data?.capabilities.limits.result_ttl_hours ?? 24} jam.
-              </p>
             </div>
           </form>
         </div>
@@ -563,22 +590,25 @@ export function Converter({ toolId }: { toolId: string }) {
                         </div>
                       )}
                       
-                      {/* Single file or ZIP result */}
-                      <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
-                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium">{job.output_filename}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {formatBytes(job.output_size)} · {job.output_format.toUpperCase()}
-                            {job.has_zip && " · ZIP"}
-                          </p>
-                          {sourcePageSize && !job.has_zip && (
+                      {/* Single file or ZIP result (absent when the batch ZIP was
+                          refused for exceeding the size limit) */}
+                      {job.output_filename && (
+                        <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+                          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{job.output_filename}</p>
                             <p className="text-xs text-muted-foreground">
-                              {job.page_count ?? job.pages.length} halaman · {sourcePageSize}
+                              {formatBytes(job.output_size)} · {job.output_format.toUpperCase()}
+                              {job.has_zip && " · ZIP"}
                             </p>
-                          )}
+                            {sourcePageSize && !job.has_zip && (
+                              <p className="text-xs text-muted-foreground">
+                                {job.page_count ?? job.pages.length} halaman · {sourcePageSize}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                      </div>
+                      )}
                       
                       {/* Download buttons */}
                       <div className="space-y-2">

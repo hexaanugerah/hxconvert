@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     storage_dir: Path = PROJECT_DIR / "storage"
     max_upload_mb: int = 200
-    max_files_per_job: int = 15
+    max_files_per_job: int = 50
     max_batch_size_mb: int = 1024
     result_ttl_hours: int = 24
     cleanup_interval_minutes: int = 15

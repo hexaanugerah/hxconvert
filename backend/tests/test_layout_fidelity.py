@@ -263,7 +263,17 @@ def test_word_to_pdf_matches_word_layout(client):
         pytest.skip("Microsoft Word is required for the reference-layout test.")
 
     source = _rich_docx()
-    job = _job(client, upload(client, "docx-to-pdf", [("source.docx", source)]))
+    # This test measures the Word reference renderer specifically; the default
+    # engine is deterministic (LibreOffice/Python) and never starts Word.
+    job = _job(
+        client,
+        upload(
+            client,
+            "docx-to-pdf",
+            [("source.docx", source)],
+            options={"engine": "word"},
+        ),
+    )
     pdf_bytes = _download(client, job)
 
     import fitz
@@ -316,6 +326,14 @@ def test_word_to_pdf_warns_about_missing_font(client):
     buffer = io.BytesIO()
     document.save(buffer)
 
-    job = _job(client, upload(client, "docx-to-pdf", [("missing-font.docx", buffer.getvalue())]))
+    job = _job(
+        client,
+        upload(
+            client,
+            "docx-to-pdf",
+            [("missing-font.docx", buffer.getvalue())],
+            options={"engine": "word"},
+        ),
+    )
     assert _download(client, job).startswith(b"%PDF")
     assert any("DocuConvert Missing Font 123" in warning for warning in job["warnings"])

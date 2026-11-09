@@ -137,6 +137,44 @@ def test_docx_to_pdf_batch_returns_none_without_word_and_libreoffice(tmp_path, m
     assert docx_ops.docx_to_pdf_batch(contexts) == [None, None]
 
 
+def test_docx_to_pdf_auto_does_not_touch_word_automation(tmp_path, monkeypatch):
+    """Auto mode must be deterministic: no Word COM, page breaks preserved."""
+    from docx import Document
+    from docx.enum.text import WD_BREAK
+
+    document = Document()
+    paragraph = document.add_paragraph("First page")
+    paragraph.add_run().add_break(WD_BREAK.PAGE)
+    document.add_paragraph("Second page")
+    source = tmp_path / "source.docx"
+    document.save(source)
+
+    def explode(*args, **kwargs):
+        raise AssertionError("Word automation must not run in auto mode")
+
+    monkeypatch.setattr(docx_ops, "word_available", lambda: True)
+    monkeypatch.setattr(docx_ops, "convert_with_word", explode)
+    monkeypatch.setattr(docx_ops, "libreoffice_available", lambda: False)
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    result = docx_ops.docx_to_pdf(
+        ConversionContext(
+            inputs=[source], original_names=[source.name], options={}, workdir=workdir
+        )
+    )
+
+    import fitz
+
+    pdf = fitz.open(result.path)
+    try:
+        assert pdf.page_count == 2
+        assert "First page" in pdf[0].get_text()
+        assert "Second page" in pdf[1].get_text()
+    finally:
+        pdf.close()
+
+
 def test_docx_to_pdf_batch_falls_back_to_soffice_for_word_failures(tmp_path, monkeypatch):
     docx_paths = []
     for index in range(2):

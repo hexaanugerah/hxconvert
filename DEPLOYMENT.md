@@ -115,6 +115,8 @@ fly deploy
 | `ALLOW_ANONYMOUS` | No | `true`/`false` - allow unauthenticated conversions |
 | `RATE_LIMIT_PER_MINUTE` | No | API rate limit per IP |
 | `MAX_UPLOAD_MB` | No | Max file upload size |
+| `MAX_FILES_PER_JOB` | No | Max files per job (default `50`) |
+| `MAX_BATCH_SIZE_MB` | No | Max combined upload size per job (default `2048`) |
 
 ## SSL Certificates
 

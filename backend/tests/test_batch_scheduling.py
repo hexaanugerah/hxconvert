@@ -38,6 +38,25 @@ def _inputs(tmp_path: Path, count: int) -> tuple[list[Path], list[str]]:
     return paths, [path.name for path in paths]
 
 
+def _size_tool(payload: bytes) -> ToolSpec:
+    """Tool that writes a fixed-size PDF so ZIP sizing can be exercised."""
+
+    def handler(ctx: ConversionContext) -> ConversionResult:
+        output = ctx.workdir / "out.pdf"
+        output.write_bytes(payload)
+        return ConversionResult(output, "out.pdf", "application/pdf")
+
+    return ToolSpec(
+        id="fake-size",
+        label="Fake Size",
+        description="",
+        category="pdf",
+        inputs=(".docx",),
+        output="pdf",
+        handler=handler,
+    )
+
+
 def test_batch_handler_runs_once_for_all_files(tmp_path, monkeypatch):
     calls: list[int] = []
 
@@ -104,6 +123,47 @@ def test_batch_handler_none_falls_back_per_file(tmp_path, monkeypatch):
     assert converted == [1]
     assert result.successful == 2
     assert result.failed == 0
+
+
+def _run_size_batch(tmp_path, monkeypatch, payload: bytes) -> batch_conversion.BatchConversionResult:
+    monkeypatch.setattr(batch_conversion, "get_tool", lambda _: _size_tool(payload))
+    monkeypatch.setattr(batch_conversion, "_worker_count", lambda: 1)
+    monkeypatch.setattr(batch_conversion, "job_output_dir", lambda bid: tmp_path / bid)
+    inputs, names = _inputs(tmp_path, 2)
+    return process_batch_conversion(
+        "batch-size", "fake-size", inputs, names, {}, tmp_path / "work"
+    )
+
+
+def test_batch_zip_warns_when_archive_payload_is_large(tmp_path, monkeypatch):
+    """Large image exports still get a ZIP, but the user is told it is heavy."""
+    monkeypatch.setattr(batch_conversion, "ZIP_WARN_MB", 1)
+    monkeypatch.setattr(batch_conversion, "ZIP_SKIP_MB", 100)
+    payload = b"%PDF-1.4\n" + b"x" * (2 * 1024 * 1024)
+
+    result = _run_size_batch(tmp_path, monkeypatch, payload)
+
+    assert result.zip_path is not None and result.zip_path.exists()
+    assert result.successful == 2
+    assert any("berukuran besar" in warning for warning in result.warnings)
+    assert not any("tidak dibuat" in warning for warning in result.warnings)
+
+
+def test_batch_zip_is_skipped_above_hard_limit(tmp_path, monkeypatch):
+    """An absurd archive is not built; per-file downloads must survive."""
+    monkeypatch.setattr(batch_conversion, "ZIP_WARN_MB", 1)
+    monkeypatch.setattr(batch_conversion, "ZIP_SKIP_MB", 2)
+    payload = b"%PDF-1.4\n" + b"x" * (2 * 1024 * 1024)
+
+    result = _run_size_batch(tmp_path, monkeypatch, payload)
+
+    assert result.zip_path is None
+    assert any("ZIP tidak dibuat" in warning for warning in result.warnings)
+    assert all(item.success for item in result.file_results)
+    assert all(
+        item.output_path is not None and item.output_path.exists()
+        for item in result.file_results
+    )
 
 
 def test_duplicate_files_convert_once(tmp_path, monkeypatch):

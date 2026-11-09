@@ -398,8 +398,8 @@ def run_conversion_job(job_id: str) -> None:
                 job.completed_at = utcnow()
                 job.expires_at = utcnow() + timedelta(hours=settings.result_ttl_hours)
                 
-                # Collect all warnings
-                all_warnings = []
+                # Collect all warnings (including archive-size notices)
+                all_warnings = list(batch_result.warnings)
                 for r in batch_result.file_results:
                     all_warnings.extend(r.warnings)
                 if batch_result.failed > 0:

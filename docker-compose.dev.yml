@@ -33,8 +33,8 @@ services:
       - SECRET_KEY=dev-secret-key-change-in-production
       - STORAGE_DIR=/app/storage
       - MAX_UPLOAD_MB=200
-      - MAX_BATCH_SIZE_MB=1024
-      - MAX_FILES_PER_JOB=15
+      - MAX_BATCH_SIZE_MB=2048
+      - MAX_FILES_PER_JOB=50
       - RESULT_TTL_HOURS=24
       - CLEANUP_INTERVAL_MINUTES=15
       - CONVERSION_TIMEOUT_SECONDS=300

@@ -104,7 +104,7 @@ Endpoint pembuatan pekerjaan memakai `multipart/form-data`:
     },
     "ocr": { "available": true, "engine": "rapidocr", "languages": ["eng", "ind"] },
     "libraries": { "PyMuPDF": "1.28.2", "pdfplumber": "0.11.9" },
-    "limits": { "max_upload_mb": 25, "max_files_per_job": 10, "result_ttl_hours": 24 }
+    "limits": { "max_upload_mb": 25, "max_files_per_job": 50, "result_ttl_hours": 24 }
   }
 }
 ```
@@ -338,14 +338,38 @@ Kemungkinan error: `413`, `415`, `422` (opsi/JSON atau jumlah berkas), `429`.
 
 | `mode` | Perilaku |
 |---|---|
-| `layout` (default) | Memakai `pdf2docx`: ukuran halaman, posisi teks, tabel, gambar raster, dan grafik vektor dipertahankan. Gambar JPEG2000/CMYK dinormalisasi. Teks tetap dapat diedit, tetapi posisinya berada dalam kotak mengambang. |
+| `auto` (default) | Klasifikasi per halaman: halaman pindai jadi gambar, halaman teks jadi teks edit, halaman campuran memakai `pdf2docx`. |
+| `fast` | Setiap halaman dirender sebagai **JPEG** pada `fast_dpi` (default 72) tanpa analisis tata letak. Paling cepat untuk batch besar: terukur 4,5 detik untuk 20 PDF 12 halaman berfoto, dibanding 26,8 detik pada mode `auto`. Teks tidak dapat diedit dan hasilnya sekualitas pratinjau layar; naikkan `fast_dpi` (72–200) bila perlu lebih tajam. |
+| `layout` | Memakai `pdf2docx`: ukuran halaman, posisi teks, tabel, gambar raster, dan grafik vektor dipertahankan. Gambar JPEG2000/CMYK dinormalisasi. Teks tetap dapat diedit, tetapi posisinya berada dalam kotak mengambang. |
 | `editable` | Alur Word sebaris (heading, paragraf, tabel asli, gambar sebaris, section per ukuran halaman). Lebih mudah diedit, posisi visual tidak persis. |
+| `full-image` | Setiap halaman dirender sebagai PNG 300 DPI. Paling setia secara visual, paling lambat, tanpa OCR. |
 
 Jika mode `layout` diminta untuk PDF yang seluruhnya hasil pindai, backend otomatis memakai mode edit + OCR (bila OCR tersedia) dan mengirim peringatan. Peringatan pada `warnings` selalu menyebut gambar, font, atau halaman yang tidak dapat dipertahankan persis; tidak ada kehilangan yang disembunyikan.
 
+Trade-off kecepatan, ketajaman, dan ukuran hasil (diukur dengan `backend/benchmark_large_batch.py` pada mesin 8 core, PDF 12 halaman berfoto 1,7 MB; satu pekerjaan dibatasi 50 berkas):
+
+| `mode` | 20 berkas | 50 berkas | Ukuran DOCX hasil |
+|---|---|---|---|
+| `fast` (72 DPI) | 4,45–4,71 dtk | 7,42–7,62 dtk | ±0,6 MB/berkas |
+| `auto` | 33,8–38,6 dtk | — | ±13 MB/berkas |
+| `full-image` (300 DPI PNG) | — | 84–104 dtk (ZIP 12–26 dtk) | ±21 MB/berkas (ZIP 1,07 GB) |
+
+`fast` adalah satu-satunya mode yang berada di bawah 5 detik untuk 20 PDF bergambar, dengan konsekuensi teks tidak dapat diedit dan ketajaman setara pratinjau layar. `full-image` mempertahankan ketajaman cetak, tetapi 50 berkas menghasilkan arsip 1,07 GB sehingga pengemasan ZIP menjadi bottleneck (12–26 dtk), bukan konversinya.
+
+Batas ZIP batch: arsip tetap dibuat dan pengguna diberi peringatan di `warnings` bila total hasil melebihi 250 MB; arsip tidak dibuat sama sekali bila melebihi 2048 MB, dan setiap berkas tetap dapat diunduh sendiri melalui `batch_results[].download_url`.
+
 #### Word ke PDF
 
-`docx-to-pdf` memakai **Microsoft Word Automation** (`WINWORD.EXE` + `pywin32`) sebagai renderer referensi di Windows, sehingga pagination, font, header/footer, tabel, gambar, dan objek mengambang sama dengan Word. Bila Word tidak tersedia atau gagal, hasil dialihkan ke **LibreOffice headless**, lalu ke renderer HTML dengan peringatan. Font yang tidak terpasang dideteksi dan dilaporkan di `warnings` sebelum penggantian terjadi.
+`docx-to-pdf` memilih renderer lewat opsi `engine`, dan **default tidak menjalankan otomasi Microsoft Word** agar hasilnya sama di server Windows maupun Linux:
+
+| `engine` | Perilaku |
+|---|---|
+| `auto` (default) | **LibreOffice headless** bila terpasang, selain itu renderer Python deterministik. Otomasi Word tidak pernah dijalankan otomatis. |
+| `libreoffice` | Hanya LibreOffice; gagal dengan pesan jelas bila tidak terpasang. |
+| `python` | Hanya renderer Python: mempertahankan ukuran halaman, margin, paragraf, tabel, gambar, dan pemisah halaman eksplisit; header/footer, kolom, dan objek mengambang kompleks dapat berbeda. |
+| `word` | Hanya Microsoft Word Automation (`WINWORD.EXE` + `pywin32`, Windows). Paling mirip aslinya, termasuk header/footer dan font. Font yang tidak terpasang dilaporkan di `warnings`. |
+
+Terukur pada 20 DOCX 6 bagian bergambar: 9,3–11,2 detik dengan `auto` di mesin tanpa LibreOffice, versus 22,5–28,5 detik melalui Word COM.
 
 ### `GET /api/v1/conversions`
 
@@ -380,7 +404,7 @@ Respons:
   "recent": [{ "...": "5 pekerjaan terakhir" }],
   "usage": {
     "max_upload_mb": 25,
-    "max_files_per_job": 10,
+    "max_files_per_job": 50,
     "result_ttl_hours": 24,
     "allow_anonymous": true
   }
