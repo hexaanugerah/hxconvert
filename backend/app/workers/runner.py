@@ -35,10 +35,29 @@ from app.services.batch_conversion import process_batch_conversion
 from app.services.document_inspection import build_page_records, preview_failures
 from app.services.registry import get_tool
 from app.services import result_cache
+from app.services.docx_fonts import ensure_embedded_fonts
 
 logger = logging.getLogger("docuconvert.worker")
 
 ACTIVE_STATUSES = ("queued", "processing")
+
+
+def _ensure_result_fonts(target, inputs) -> None:
+    """Give a PDF-to-DOCX result the source fonts, even when it is cached.
+
+    A DOCX produced by an older build (or served from the result cache) may
+    still reference the PDF font without carrying it, so Word on another
+    machine substitutes a wider face and the layout moves. Embedding here is
+    best effort and never fails the job.
+    """
+    if not inputs or target.suffix.lower() != ".docx":
+        return
+    if inputs[0].suffix.lower() != ".pdf":
+        return
+    try:
+        ensure_embedded_fonts(target, inputs[0])
+    except Exception:
+        logger.exception("Font embedding failed for %s", target.name)
 
 
 def _fail(db, job: ConversionJob, message: str, log_message: str | None = None) -> None:
@@ -116,6 +135,7 @@ def _run_single_conversion(
         output_dir = job_output_dir(job.id)
         target = output_dir / filename
         shutil.copy2(cached_path, target)
+        _ensure_result_fonts(target, inputs)
         job.output_filename = filename
         job.output_path = str(target)
         job.output_size = target.stat().st_size
@@ -187,6 +207,7 @@ def _run_single_conversion(
     target = output_dir / filename
     with stage_timer("save_result", job_id=job.id, tool=job.tool):
         shutil.move(str(result.path), target)
+    _ensure_result_fonts(target, inputs)
 
     job.output_filename = filename
     job.output_path = str(target)

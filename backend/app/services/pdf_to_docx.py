@@ -41,7 +41,7 @@ from docx.enum.table import (
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Emu, Inches, Pt
+from docx.shared import Emu, Inches, Pt, RGBColor
 from PIL import Image, ImageOps
 
 from app.core.errors import ConversionError
@@ -98,6 +98,27 @@ def _line_text(line: dict) -> str:
 def _is_bold(span: dict) -> bool:
     flags = span.get("flags", 0)
     return bool(flags & 16)
+
+
+# Family names that already describe a weight ("Source Sans Pro SemiBold").
+# Adding w:b on top of such a face makes Word draw it heavier than the PDF.
+_FAMILY_WEIGHT_RE = re.compile(
+    r"(?:semi|demi|extra|ultra)?bold|black|heavy", re.IGNORECASE
+)
+
+
+def _family_carries_weight(family: str | None) -> bool:
+    return bool(family and _FAMILY_WEIGHT_RE.search(family))
+
+
+def _font_weight(font_name: str) -> str:
+    """Classify a PDF font name as regular, semibold or bold."""
+    lowered = font_name.lower()
+    if "semi" in lowered or "demi" in lowered:
+        return "semibold"
+    if "bold" in lowered or "black" in lowered or "heavy" in lowered:
+        return "bold"
+    return "regular"
 
 
 def _is_italic(span: dict) -> bool:
@@ -870,7 +891,8 @@ BORDER_TEXT_INSET = Emu(45720)  # 0.05 inch
 # colon column right after the longest label (the source font fits with no
 # spare space), so re-rendering in a substituted font pushes that one colon a
 # few points right. Give the shared label tab stop a little headroom.
-COLON_TAB_HEADROOM = Emu(45720)  # 0.05 inch
+COLON_TAB_HEADROOM = Emu(45720)  # 0.05 inch, only when text cannot be measured
+COLON_TAB_EPSILON = Emu(6350)  # 0.5 point of breathing room past the label
 UNSAFE_TAB_RESERVE = Emu(109728)  # 0.12 inch
 
 
@@ -913,7 +935,31 @@ def _inset_border_colon_text(document) -> bool:
     return changed
 
 
-def _align_colon_columns(document) -> bool:
+def _measured_label_width_emu(paragraph, measurer: FontMeasurer) -> int | None:
+    """Width of the label before the colon tab, in EMU, if it can be measured."""
+    label = paragraph.text.split("\t", 1)[0]
+    if not label.strip():
+        return None
+    run = next((item for item in paragraph.runs if item.text.strip()), None)
+    if run is None or not run.font.name:
+        return None
+    size = run.font.size.pt if run.font.size is not None else 10.0
+    width = measurer.width(run.font.name, size, label)
+    if width is None:
+        return None
+    scaling = 100.0
+    properties = run._r.rPr
+    if properties is not None:
+        node = properties.find(qn("w:w"))
+        if node is not None:
+            try:
+                scaling = float(node.get(qn("w:val"))) / 100.0
+            except (TypeError, ValueError):
+                pass
+    return int(width * scaling * 12700)
+
+
+def _align_colon_columns(document, pdf_path: Path | None = None) -> bool:
     """Keep label/value colons in one vertical column.
 
     pdf2docx inserts a tab stop when a PDF stores the label and its value as
@@ -922,7 +968,13 @@ def _align_colon_columns(document) -> bool:
     away from the neighbouring rows. In a container that already has at least
     one tab-aligned ``Label: value`` line, every other such line is moved onto
     the same tab stop.
+
+    The stop is the source colon column unless the longest label, measured with
+    the PDF's own font, would reach it: then it moves just past the text. That
+    keeps the colon next to its label (as in the PDF) without letting a wider
+    substituted font push it to the next default tab.
     """
+    measurer = FontMeasurer(pdf_path) if pdf_path is not None else None
     containers = [document.paragraphs]
     for table in document.tables:
         for cell in _unique_table_cells(table):
@@ -939,7 +991,21 @@ def _align_colon_columns(document) -> bool:
             ]
             if not positions:
                 continue
-            target = Counter(positions).most_common(1)[0][0] + COLON_TAB_HEADROOM
+            target = Counter(positions).most_common(1)[0][0]
+            needed = None
+            if measurer is not None:
+                measured = [
+                    _measured_label_width_emu(paragraph, measurer)
+                    for paragraph, _info in group
+                ]
+                if all(value is not None for value in measured):
+                    needed = max(int(value) for value in measured) + int(
+                        COLON_TAB_EPSILON
+                    )
+            if needed is None:
+                target += COLON_TAB_HEADROOM
+            else:
+                target = max(target, needed)
             unsafe = False
             for paragraph, _info in group:
                 width = _cell_text_width(paragraph)
@@ -1254,11 +1320,13 @@ def _convert_layout_mode(
         changed = True
     if _apply_layout_font_aliases(document):
         changed = True
-    if _align_colon_columns(document):
+    if _align_colon_columns(document, ctx.input):
         changed = True
     if _inset_border_colon_text(document):
         changed = True
     if _relax_layout_row_heights(document):
+        changed = True
+    if _normalise_table_ooxml(document):
         changed = True
     if changed:
         document.save(output)
@@ -1403,7 +1471,7 @@ def _convert_editable(
     current_size = (first.width, first.height)
     document.core_properties.title = Path(ctx.original_name).stem
 
-    tables_source = _TableSource(ctx.input)
+    tables_source = _TableSource(ctx.input, font_families, doc)
 
     try:
         for info in page_analysis[:page_limit]:
@@ -1482,6 +1550,35 @@ def _convert_editable(
                         f"Tabel pada halaman {page_index + 1} tidak dapat dianalisis."
                     )
 
+            # Photos and logos inside a table cell are placed into that cell
+            # when the table is written; otherwise they are appended after it
+            # and can spill onto an extra page.
+            table_images: dict[int, list[tuple[dict, object]]] = {}
+            deferred_images: set[int] = set()
+            image_blocks = [block for block in blocks if block.get("type") == 1]
+            for table_index, table in enumerate(tables):
+                table_rect = fitz.Rect(table.bbox)
+                for block in image_blocks:
+                    block_rect = fitz.Rect(block["bbox"])
+                    center = fitz.Point(
+                        (block_rect.x0 + block_rect.x1) / 2,
+                        (block_rect.y0 + block_rect.y1) / 2,
+                    )
+                    if not table_rect.contains(center):
+                        continue
+                    stream = _prepare_image(
+                        block.get("image"),
+                        block,
+                        page,
+                        block_rect,
+                        warnings,
+                        page_index + 1,
+                    )
+                    if stream is None:
+                        continue
+                    table_images.setdefault(table_index, []).append((block, stream))
+                    deferred_images.add(id(block))
+
             text_blocks = [block for block in blocks if block.get("type") == 0]
             left = [
                 block
@@ -1524,15 +1621,27 @@ def _convert_editable(
                     if index in emitted:
                         continue
                     emitted.add(index)
+                    # Never let a table run past the page edge: Word then
+                    # squeezes every column until the text wraps per character
+                    # and the table grows onto an extra page. The source table
+                    # itself already fits, so its own widths are kept whenever
+                    # they are narrower than the page.
+                    table_indent_in = max(
+                        0.0, (table.bbox[0] - section.left_margin.pt) / 72
+                    )
+                    page_width_in = max(1.0, (width - 2.0) / 72)
                     _add_table(
                         document,
                         table,
-                        max(1.0, width / 72 - 0.05),
-                        (table.bbox[0] - section.left_margin.pt) / 72,
+                        max(1.0, page_width_in - table_indent_in),
+                        table_indent_in,
+                        table_images.get(index, []),
                     )
                     continue
 
                 block = item
+                if id(block) in deferred_images:
+                    continue
                 if block.get("type") == 1:
                     if _add_image(
                         document,
@@ -1573,6 +1682,7 @@ def _convert_editable(
             + " terdeteksi sebagai dua kolom; urutan bacaan mungkin tidak sempurna."
         )
 
+    _normalise_table_ooxml(document)
     output = ctx.workdir / "converted.docx"
     document.save(output)
 
@@ -1721,6 +1831,24 @@ class DetectedTable:
     # Borders that actually exist in the PDF. This keeps a form box with one
     # vertical divider from gaining a full grid of extra row lines.
     borders: tuple[str, ...] = ()
+    # Cells that cover more than one column, as (row, start column, span).
+    # pdfplumber reports a form box and the table inside it as two nested
+    # grids; representing the union as one grid with spans keeps both the
+    # header block and the body columns at their original widths.
+    merges: list[tuple[int, int, int]] = field(default_factory=list)
+    # Colour of the source rules as a plain OOXML hex value (no '#').
+    border_color: str = "000000"
+    # Runs per cell line, keyed by (row, start column). Each line is a list of
+    # (text, bold, family, colour, size) so the label stays bold while its value
+    # keeps the source's SemiBold cut, and so blue headings stay blue instead of
+    # turning black.
+    cell_runs: dict[
+        tuple[int, int],
+        list[list[tuple[str, bool, str | None, str | None, float | None]]],
+    ] = field(default_factory=dict)
+    # Most used text size in the table, in PDF points. Word stores sizes in
+    # half-points, so 10.12pt becomes 10pt (the closest representable value).
+    font_size: float | None = None
 
 
 class _TableSource:
@@ -1730,9 +1858,17 @@ class _TableSource:
     for tables, which multiplied I/O the longer the document was.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        families: PdfFontFamilies | None = None,
+        document=None,
+    ) -> None:
         self.path = path
+        self.families = families
         self._pdf = None
+        self._fitz = document
+        self._owns_fitz = document is None
 
     def collect(self, page_index: int) -> list[DetectedTable]:
         import pdfplumber
@@ -1742,8 +1878,22 @@ class _TableSource:
         if page_index >= len(self._pdf.pages):
             return []
         page = self._pdf.pages[page_index]
+        fitz_page = None
+        try:
+            if self._fitz is None:
+                self._fitz = fitz.open(str(self.path))
+            fitz_page = self._fitz[page_index]
+        except Exception:
+            fitz_page = None
         tables: list[DetectedTable] = []
-        for table in page.find_tables():
+        found = list(page.find_tables())
+        cell_boxes = [_table_cell_boxes(table) for table in found]
+        for position, table in enumerate(found):
+            if _is_nested_table(position, found, cell_boxes):
+                # Its text already lives in the enclosing table's cell. Emitting
+                # it again duplicates the form below the table and pushes the
+                # page over its height.
+                continue
             raw_rows = table.extract()
             cleaned_rows: list[list[str]] = []
             kept_indices: list[int] = []
@@ -1772,6 +1922,7 @@ class _TableSource:
             # pdfplumber as a single tall row with multi-line cells. Rebuild
             # the logical rows from the text positions so the form stays a
             # table instead of collapsing into loose paragraphs.
+            rebuilt = None
             if len(cleaned_rows) == 1:
                 rebuilt = _split_merged_table_row(page, table)
                 if rebuilt is not None:
@@ -1780,22 +1931,53 @@ class _TableSource:
                 continue
 
             widths: list[float] = []
-            try:
-                widths = [
-                    max(0.0, float(column.bbox[2]) - float(column.bbox[0]))
-                    for column in table.columns
-                ]
-            except (AttributeError, IndexError, TypeError, ValueError):
+            merges: list[tuple[int, int, int]] = []
+            cell_runs: dict[
+                tuple[int, int],
+                list[list[tuple[str, bool, str | None, str | None, float | None]]],
+            ] = {}
+            grid = (
+                None
+                if rebuilt is not None
+                else _grid_table(page, table, self.families, fitz_page)
+            )
+            if grid is not None:
+                # Rebuild rows, widths and merges from the real cell geometry.
+                # ``table.columns`` gives the union bounding box of every cell
+                # in a column, which is wrong as soon as a row has merged
+                # cells: the widths then add up to several times the page and
+                # the scaled-down columns collapse to a few points wide.
+                cleaned_rows, row_heights, widths, merges, cell_runs = grid
+            else:
+                try:
+                    widths = [
+                        max(0.0, float(column.bbox[2]) - float(column.bbox[0]))
+                        for column in table.columns
+                    ]
+                except (AttributeError, IndexError, TypeError, ValueError):
+                    widths = []
+            if len(widths) != len(cleaned_rows[0]) or sum(widths) <= 0:
                 widths = []
-            if len(widths) != columns or sum(widths) <= 0:
-                widths = []
+            sides, border_color = _detect_table_ruling(page, table.bbox)
+            sizes: Counter[float] = Counter()
+            for run_lines in cell_runs.values():
+                for line in run_lines:
+                    for part in line:
+                        if part[4]:
+                            sizes[part[4]] += len(part[0])
             tables.append(
                 DetectedTable(
                     bbox=tuple(table.bbox),
                     rows=cleaned_rows,
                     column_widths=widths,
                     row_heights=row_heights,
-                    borders=_detect_table_borders(page, table.bbox),
+                    borders=sides,
+                    merges=merges,
+                    border_color=border_color,
+                    cell_runs=cell_runs,
+                    font_size=(
+                        max(sizes, key=lambda value: sizes[value]) if sizes else None
+                    ),
                 )
             )
         return tables
@@ -1807,6 +1989,284 @@ class _TableSource:
             except Exception:  # pragma: no cover - defensive
                 pass
             self._pdf = None
+        if self._owns_fitz and self._fitz is not None:
+            try:
+                self._fitz.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._fitz = None
+
+
+def _table_cell_boxes(table) -> list[tuple[float, float, float, float]]:
+    """Unique cell rectangles of a pdfplumber table, in page coordinates."""
+    boxes: list[tuple[float, float, float, float]] = []
+    seen: set[tuple[float, float, float, float]] = set()
+    try:
+        rows = table.rows
+    except AttributeError:
+        return boxes
+    for row in rows:
+        for cell in row.cells:
+            if cell is None:
+                continue
+            try:
+                box = tuple(round(float(value), 1) for value in cell)
+            except (TypeError, ValueError):
+                continue
+            if len(box) != 4 or box in seen:
+                continue
+            seen.add(box)
+            boxes.append((float(cell[0]), float(cell[1]), float(cell[2]), float(cell[3])))
+    return boxes
+
+
+def _contains_box(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+    tolerance: float = 1.0,
+) -> bool:
+    return (
+        outer[0] <= inner[0] + tolerance
+        and outer[1] <= inner[1] + tolerance
+        and outer[2] >= inner[2] - tolerance
+        and outer[3] >= inner[3] - tolerance
+    )
+
+
+def _is_nested_table(position: int, tables, cell_boxes) -> bool:
+    """True when a table is drawn inside one cell of a larger table."""
+    if len(tables) < 2:
+        return False
+    bbox = tuple(float(value) for value in tables[position].bbox)
+    area = max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+    for other_index, cells in enumerate(cell_boxes):
+        if other_index == position:
+            continue
+        other = tables[other_index]
+        other_bbox = tuple(float(value) for value in other.bbox)
+        other_area = max(0.0, other_bbox[2] - other_bbox[0]) * max(
+            0.0, other_bbox[3] - other_bbox[1]
+        )
+        if other_area <= area:
+            continue
+        if any(_contains_box(cell, bbox) for cell in cells):
+            return True
+    return False
+
+
+def _cluster_positions(values, tolerance: float = 1.5) -> list[float]:
+    """Collapse near-identical coordinates into one grid line."""
+    ordered = sorted(float(value) for value in values)
+    clusters: list[list[float]] = []
+    for value in ordered:
+        if clusters and abs(value - clusters[-1][-1]) <= tolerance:
+            clusters[-1].append(value)
+        else:
+            clusters.append([value])
+    return [sorted(group)[len(group) // 2] for group in clusters]
+
+
+def _nearest_position(positions: list[float], value: float, tolerance: float = 2.0) -> int | None:
+    if not positions:
+        return None
+    index = min(range(len(positions)), key=lambda i: abs(positions[i] - value))
+    return index if abs(positions[index] - value) <= tolerance else None
+
+
+def _span_color(span: dict) -> str | None:
+    """sRGB colour of a PDF span as an OOXML hex value, or None for black."""
+    try:
+        value = int(span.get("color", 0)) & 0xFFFFFF
+    except (TypeError, ValueError):
+        return None
+    return None if value == 0 else f"{value:06X}"
+
+
+def _cell_text_runs(
+    fitz_page, box, families: PdfFontFamilies | None
+) -> tuple[str, list[list[tuple[str, bool, str | None, str | None, float | None]]]]:
+    """Text and per-span runs of one cell, read with the PDF's own fonts.
+
+    Spans are grouped by baseline, so a bold label and the SemiBold value next
+    to it stay separate runs on one line instead of turning into one bold run.
+    Each run keeps its weight, family, colour and size so the editable file
+    reproduces the source's blue headings and 10.12pt table text.
+    """
+    try:
+        data = fitz_page.get_text("dict", clip=fitz.Rect(box))
+    except Exception:
+        return "", []
+    spans: list[tuple[float, float, float, float, str, str, str | None, float | None]] = []
+    for block in data.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = span.get("text") or ""
+                if not text.strip():
+                    continue
+                try:
+                    x0, y0, x1, y1 = (float(value) for value in span["bbox"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                try:
+                    size = float(span.get("size")) or None
+                except (TypeError, ValueError):
+                    size = None
+                spans.append(
+                    (
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        text,
+                        str(span.get("font") or ""),
+                        _span_color(span),
+                        size,
+                    )
+                )
+    if not spans:
+        return "", []
+    spans.sort(key=lambda item: ((item[1] + item[3]) / 2, item[0]))
+
+    grouped: list[
+        tuple[
+            float,
+            list[tuple[float, float, float, float, str, str, str | None, float | None]],
+        ]
+    ] = []
+    for span in spans:
+        center = (span[1] + span[3]) / 2
+        if grouped and abs(center - grouped[-1][0]) <= 2.5:
+            grouped[-1][1].append(span)
+        else:
+            grouped.append((center, [span]))
+
+    text_lines: list[str] = []
+    run_lines: list[list[tuple[str, bool, str | None, str | None, float | None]]] = []
+    for _center, line_spans in grouped:
+        line_spans.sort(key=lambda item: item[0])
+        runs: list[tuple[str, bool, str | None, str | None, float | None]] = []
+        line_text = ""
+        previous_x1 = None
+        for x0, _y0, x1, _y1, text, name, color, size in line_spans:
+            if (
+                previous_x1 is not None
+                and x0 - previous_x1 > 1.0
+                and runs
+                and not runs[-1][0].endswith(" ")
+                and not text.startswith(" ")
+            ):
+                runs[-1] = (runs[-1][0] + " ",) + runs[-1][1:]
+                line_text += " "
+            weight = _font_weight(name)
+            family = families.family(name) if families is not None else None
+            carries = _family_carries_weight(family)
+            bold = weight in ("bold", "semibold") and not carries
+            if (
+                runs
+                and runs[-1][1:] == (bold, family, color, size)
+            ):
+                runs[-1] = (runs[-1][0] + text,) + runs[-1][1:]
+            else:
+                runs.append((text, bold, family, color, size))
+            line_text += text
+            previous_x1 = x1
+        text_lines.append(line_text)
+        run_lines.append(runs)
+    return "\n".join(text_lines).strip("\n"), run_lines
+
+
+def _grid_table(
+    page, table, families: PdfFontFamilies | None = None, fitz_page=None
+) -> (
+    tuple[
+        list[list[str]],
+        list[float],
+        list[float],
+        list[tuple[int, int, int]],
+        dict[
+            tuple[int, int],
+            list[list[tuple[str, bool, str | None, str | None, float | None]]],
+        ],
+    ]
+    | None
+):
+    """Rebuild a table as one rectangular grid that fits Word.
+
+    Every distinct cell edge becomes a grid line, so the union of a form box
+    and the table inside it is one grid. Cells that cover several columns are
+    recorded as merges instead of being squashed into one column, which keeps
+    the original column widths (and therefore the page count) intact.
+    """
+    try:
+        row_boxes = [tuple(float(value) for value in row.bbox) for row in table.rows]
+        row_cells = [
+            [
+                tuple(float(value) for value in cell)
+                for cell in row.cells
+                if cell is not None
+            ]
+            for row in table.rows
+        ]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(row_boxes) < 2 or not row_cells:
+        return None
+
+    xs = _cluster_positions(
+        [value for cells in row_cells for box in cells for value in (box[0], box[2])]
+    )
+    if len(xs) < 3:
+        return None
+    columns = len(xs) - 1
+
+    rows = [[""] * columns for _ in row_boxes]
+    merges: list[tuple[int, int, int]] = []
+    cell_runs: dict[
+        tuple[int, int],
+        list[list[tuple[str, bool, str | None, str | None, float | None]]],
+    ] = {}
+    for row_index, cells in enumerate(row_cells):
+        starts: set[int] = set()
+        for box in cells:
+            start = _nearest_position(xs, box[0])
+            end = _nearest_position(xs, box[2])
+            if start is None or end is None or end <= start:
+                continue
+            if start in starts:
+                continue
+            starts.add(start)
+            run_lines: (
+                list[
+                    list[tuple[str, bool, str | None, str | None, float | None]]
+                ]
+                | None
+            ) = None
+            if fitz_page is not None:
+                text, run_lines = _cell_text_runs(fitz_page, box, families)
+            else:
+                try:
+                    text = (
+                        page.crop(box, strict=False).extract_text() or ""
+                    ).replace("\r", "").strip("\n")
+                except Exception:
+                    text = ""
+            text = text.replace("\r", "").strip("\n")
+            if text:
+                if rows[row_index][start]:
+                    rows[row_index][start] += "\n" + text
+                    run_lines = None
+                else:
+                    rows[row_index][start] = text
+                    if run_lines is not None:
+                        cell_runs[(row_index, start)] = run_lines
+            if end - start > 1:
+                merges.append((row_index, start, end - start))
+
+    widths = [xs[index + 1] - xs[index] for index in range(columns)]
+    if any(width <= 0 for width in widths):
+        return None
+    heights = [max(0.0, box[3] - box[1]) for box in row_boxes]
+    return rows, heights, widths, merges, cell_runs
 
 
 def _split_merged_table_row(
@@ -1875,20 +2335,61 @@ def _split_merged_table_row(
     return rows, heights
 
 
-def _detect_table_borders(page, bbox) -> tuple[str, ...]:
-    """Return the source borders that exist around and inside ``bbox``."""
+def _edge_color_hex(edge) -> str | None:
+    """Rule colour of one pdfplumber edge as ``RRGGBB``.
+
+    Returns an empty string when the edge carries no colour information (a
+    plain stroked line, which is black), and None for an invisible white fill.
+    """
+    values = edge.get("non_stroking_color")
+    if values is None:
+        values = edge.get("stroking_color")
+    if values is None:
+        return ""
+    if isinstance(values, (int, float)):
+        components = [float(values)]
+    else:
+        try:
+            components = [float(value) for value in values]
+        except (TypeError, ValueError):
+            return ""
+    if len(components) == 1:
+        components = components * 3
+    elif len(components) == 4:  # CMYK
+        cyan, magenta, yellow, black = components
+        components = [
+            (1 - cyan) * (1 - black),
+            (1 - magenta) * (1 - black),
+            (1 - yellow) * (1 - black),
+        ]
+    if len(components) < 3:
+        return None
+    channels = [max(0, min(255, round(value * 255))) for value in components[:3]]
+    if min(channels) >= 247:  # white background, not a visible rule
+        return None
+    return "".join(f"{channel:02X}" for channel in channels)
+
+
+def _detect_table_ruling(page, bbox) -> tuple[tuple[str, ...], str]:
+    """Return the source borders inside ``bbox`` and their dominant colour.
+
+    Forms print each cell side as its own short segment, so a border is only
+    recognised by how much of the table edge it covers, never by a single
+    full-width line. Invisible (white) fills are ignored.
+    """
     try:
         x0, top, x1, bottom = (float(value) for value in bbox)
         edges = list(page.edges)
     except (AttributeError, TypeError, ValueError):
-        return TABLE_BORDER_SIDES
+        return TABLE_BORDER_SIDES, "000000"
     if x1 <= x0 or bottom <= top or not edges:
-        return TABLE_BORDER_SIDES
+        return TABLE_BORDER_SIDES, "000000"
 
     tolerance = 3.0
     width = x1 - x0
     height = bottom - top
-    found: set[str] = set()
+    coverage = {side: 0.0 for side in TABLE_BORDER_SIDES}
+    colour_weight: dict[str, float] = {}
     for edge in edges:
         try:
             ex0 = float(edge["x0"])
@@ -1897,27 +2398,50 @@ def _detect_table_borders(page, bbox) -> tuple[str, ...]:
             ebottom = float(edge["bottom"])
         except (KeyError, TypeError, ValueError):
             continue
-        horizontal = abs(ebottom - etop) <= tolerance
-        vertical = abs(ex1 - ex0) <= tolerance
-        spans_width = ex0 <= x0 + tolerance and ex1 >= x1 - tolerance
-        spans_height = etop <= top + tolerance and ebottom >= bottom - tolerance
-        if horizontal and ex1 - ex0 >= width * 0.5:
-            if spans_width and abs(etop - top) <= tolerance:
-                found.add("top")
-            if spans_width and abs(etop - bottom) <= tolerance:
-                found.add("bottom")
-            if top + tolerance < etop < bottom - tolerance:
-                found.add("insideH")
-        elif vertical and ebottom - etop >= height * 0.5:
-            if spans_height and abs(ex0 - x0) <= tolerance:
-                found.add("left")
-            if spans_height and abs(ex0 - x1) <= tolerance:
-                found.add("right")
-            if x0 + tolerance < ex0 < x1 - tolerance:
-                found.add("insideV")
-    if not found:
-        return TABLE_BORDER_SIDES
-    return tuple(side for side in TABLE_BORDER_SIDES if side in found)
+        colour = _edge_color_hex(edge)
+        if colour is None:
+            continue
+        colour = colour or "000000"
+        side = None
+        overlap = 0.0
+        if abs(ebottom - etop) <= tolerance:  # horizontal rule
+            overlap = max(0.0, min(x1, ex1) - max(x0, ex0))
+            if overlap <= 0:
+                continue
+            if abs(etop - top) <= tolerance:
+                side = "top"
+            elif abs(etop - bottom) <= tolerance:
+                side = "bottom"
+            elif top + tolerance < etop < bottom - tolerance:
+                side = "insideH"
+        elif abs(ex1 - ex0) <= tolerance:  # vertical rule
+            overlap = max(0.0, min(bottom, ebottom) - max(top, etop))
+            if overlap <= 0:
+                continue
+            if abs(ex0 - x0) <= tolerance:
+                side = "left"
+            elif abs(ex0 - x1) <= tolerance:
+                side = "right"
+            elif x0 + tolerance < ex0 < x1 - tolerance:
+                side = "insideV"
+        if side is None:
+            continue
+        coverage[side] += overlap
+        colour_weight[colour] = colour_weight.get(colour, 0.0) + overlap
+
+    sides = tuple(
+        side
+        for side in TABLE_BORDER_SIDES
+        if coverage[side] >= 0.5 * (width if side in ("top", "bottom", "insideH") else height)
+    )
+    if not sides:
+        return TABLE_BORDER_SIDES, "000000"
+    colour = max(colour_weight, key=colour_weight.get) if colour_weight else "000000"
+    return sides, colour
+
+
+def _detect_table_borders(page, bbox) -> tuple[str, ...]:
+    return _detect_table_ruling(page, bbox)[0]
 
 
 def _block_text(
@@ -1968,7 +2492,12 @@ def _add_runs(
         if not text:
             continue
         run = paragraph.add_run(text)
-        run.bold = True if bold_all else bold
+        # The face itself may already be a SemiBold/Bold cut; marking the run
+        # bold would stack synthetic weight on top of it.
+        if _family_carries_weight(family):
+            run.bold = False
+        else:
+            run.bold = True if bold_all else bold
         run.italic = italic
         if superscript:
             run.font.superscript = True
@@ -2083,8 +2612,133 @@ def _set_table_cell_margins(table) -> None:
     )
 
 
-def _set_table_borders(table, sides: tuple[str, ...]) -> None:
-    """Draw only the borders that exist in the source PDF."""
+BORDER_CONTAINERS = {"tblBorders", "tcBorders", "pBdr"}
+# Cell margins also accept the newer start/end names; older suites only know
+# left/right.
+MARGIN_CONTAINERS = {"tcMar", "tblCellMar"}
+_BORDER_CHILD_ORDER = (
+    "top",
+    "start",
+    "left",
+    "bottom",
+    "end",
+    "right",
+    "insideH",
+    "insideV",
+    "tl2br",
+    "tr2bl",
+    "between",
+    "bar",
+)
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _normalise_table_ooxml(document) -> bool:
+    """Make the converted table XML valid for Word, WPS and LibreOffice alike.
+
+    pdf2docx writes ``w:sz`` as a float (``5.5999...``), puts a ``#`` in
+    ``w:color`` and repeats ``w:tcMar`` once per cell edge. Word is forgiving,
+    the other suites are not. Values are rounded/clamped to the schema and
+    ``w:start``/``w:end`` are renamed to the older ``w:left``/``w:right`` names
+    every suite understands.
+    """
+    changed = False
+    body = document.element.body
+
+    def rename_start_end(parent) -> bool:
+        renamed = False
+        for old, new in (("start", "left"), ("end", "right")):
+            for node in list(parent):
+                if _xml_local_name(node.tag) != old:
+                    continue
+                twin = next(
+                    (
+                        sibling
+                        for sibling in parent
+                        if _xml_local_name(sibling.tag) == new
+                    ),
+                    None,
+                )
+                if twin is not None:
+                    parent.remove(node)
+                else:
+                    node.tag = qn(f"w:{new}")
+                renamed = True
+        return renamed
+
+    for parent in body.iter():
+        local = _xml_local_name(parent.tag)
+        if local in MARGIN_CONTAINERS:
+            if rename_start_end(parent):
+                changed = True
+            continue
+        if local not in BORDER_CONTAINERS:
+            continue
+        if rename_start_end(parent):
+            changed = True
+        for node in list(parent):
+            if _xml_local_name(node.tag) not in _BORDER_CHILD_ORDER:
+                continue
+            size = node.get(qn("w:sz"))
+            if size is not None:
+                try:
+                    rounded = max(2, min(96, int(round(float(size)))))
+                except (TypeError, ValueError):
+                    rounded = 6
+                if str(rounded) != size:
+                    node.set(qn("w:sz"), str(rounded))
+                    changed = True
+            space = node.get(qn("w:space"))
+            if space is not None:
+                try:
+                    rounded = max(0, min(31, int(round(float(space)))))
+                except (TypeError, ValueError):
+                    rounded = 0
+                if str(rounded) != space:
+                    node.set(qn("w:space"), str(rounded))
+                    changed = True
+
+    # A colour is a six-digit hex value, never a CSS colour.
+    for element in body.iter():
+        for attribute in ("color", "fill"):
+            value = element.get(qn(f"w:{attribute}"))
+            if not value or not value.startswith("#"):
+                continue
+            cleaned = value.lstrip("#")
+            if re.fullmatch(r"[0-9A-Fa-f]{6}", cleaned):
+                element.set(qn(f"w:{attribute}"), cleaned.upper())
+            else:
+                element.set(qn(f"w:{attribute}"), "auto")
+            changed = True
+
+    # Only one set of cell margins is allowed per cell.
+    for properties in body.iter():
+        if _xml_local_name(properties.tag) != "tcPr":
+            continue
+        margins = [
+            child
+            for child in list(properties)
+            if _xml_local_name(child.tag) == "tcMar"
+        ]
+        for duplicate in margins[1:]:
+            properties.remove(duplicate)
+            changed = True
+
+    return changed
+
+
+def _set_table_borders(
+    table, sides: tuple[str, ...], color: str = "000000"
+) -> None:
+    """Draw only the borders that exist in the source PDF.
+
+    ``w:sz`` is an integer count of eighths of a point and ``w:color`` a plain
+    six-digit hex value; Word tolerates anything else, WPS and LibreOffice do
+    not, so both are normalised here.
+    """
     tbl_pr = table._tbl.tblPr
     existing = tbl_pr.find(qn("w:tblBorders"))
     if existing is not None:
@@ -2096,7 +2750,7 @@ def _set_table_borders(table, sides: tuple[str, ...]) -> None:
             node.set(qn("w:val"), "single")
             node.set(qn("w:sz"), "6")
             node.set(qn("w:space"), "0")
-            node.set(qn("w:color"), "000000")
+            node.set(qn("w:color"), color.lstrip("#").upper())
         else:
             node.set(qn("w:val"), "nil")
         borders.append(node)
@@ -2112,11 +2766,72 @@ def _set_table_borders(table, sides: tuple[str, ...]) -> None:
     )
 
 
+def _table_cell_for_point(
+    detected: DetectedTable, widths: list[float], point: tuple[float, float]
+) -> tuple[int, int] | None:
+    """Find the merged cell that contains a PDF-space point."""
+    x, y = point
+    x0, y0, x1, y1 = detected.bbox
+    if not (x0 - 1 <= x <= x1 + 1 and y0 - 1 <= y <= y1 + 1):
+        return None
+
+    row_index = len(detected.rows) - 1
+    cursor = y0
+    for index, height in enumerate(detected.row_heights[: len(detected.rows)]):
+        if cursor <= y < cursor + height:
+            row_index = index
+            break
+        cursor += height
+
+    source = detected.column_widths
+    if len(source) != len(widths) or sum(source) <= 0:
+        source = widths
+    column_index = len(widths) - 1
+    cursor = x0
+    for index, width in enumerate(source):
+        if cursor <= x < cursor + width:
+            column_index = index
+            break
+        cursor += width
+
+    for row, start, span in detected.merges:
+        if row == row_index and start <= column_index < start + span:
+            return row_index, start
+    return row_index, column_index
+
+
+def _word_font_size(size: float | None, fallback: float) -> float:
+    """Closest size Word can store (it uses half-points) to a PDF size."""
+    value = size if size and 1.0 <= size <= 48.0 else fallback
+    return round(value * 2) / 2
+
+
+def _dominant_cell_style(
+    run_lines: list[list[tuple[str, bool, str | None, str | None, float | None]]]
+    | None,
+) -> tuple[str | None, float | None]:
+    """Most used colour and size of a cell, weighted by character count."""
+    if not run_lines:
+        return None, None
+    colors: Counter[str] = Counter()
+    sizes: Counter[float] = Counter()
+    for line in run_lines:
+        for text, _bold, _family, color, size in line:
+            if color:
+                colors[color] += len(text)
+            if size:
+                sizes[size] += len(text)
+    color = max(colors, key=lambda value: colors[value]) if colors else None
+    size = max(sizes, key=lambda value: sizes[value]) if sizes else None
+    return color, size
+
+
 def _add_table(
     document,
     detected: DetectedTable,
     max_width_inches: float,
     indent_inches: float = 0.0,
+    images: list[tuple[dict, object]] | None = None,
 ):
     rows = detected.rows
     columns = max(len(row) for row in rows)
@@ -2128,7 +2843,9 @@ def _add_table(
     _set_table_layout(table, sum(widths), indent_inches * 72)
     _set_table_cell_margins(table)
     _set_table_borders(
-        table, detected.borders if detected.borders else TABLE_BORDER_SIDES
+        table,
+        detected.borders if detected.borders else TABLE_BORDER_SIDES,
+        detected.border_color,
     )
     for column_index, width in enumerate(widths):
         table.columns[column_index].width = Pt(width)
@@ -2138,17 +2855,79 @@ def _add_table(
         table_row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
 
     label_values = _is_label_value_table(rows)
+    table_size = detected.font_size or 9.5
+
+    # Apply the merged cells before filling them, so a header block that spans
+    # several body columns is one cell again instead of text crammed into the
+    # first column (and so its text is not written several times).
+    merges: list[tuple[int, int, int]] = []
+    for row_index, start, span in detected.merges:
+        if row_index >= len(rows) or start < 0 or span < 2:
+            continue
+        end = start + span - 1
+        if end >= columns:
+            continue
+        try:
+            table.cell(row_index, start).merge(table.cell(row_index, end))
+        except Exception:
+            continue
+        merges.append((row_index, start, span))
+    merge_span = {(row_index, start): span for row_index, start, span in merges}
+    covered = {
+        (row_index, start + offset)
+        for row_index, start, span in merges
+        for offset in range(1, span)
+    }
+
+    # Pictures that sit inside a table cell (a logo in a form header) belong in
+    # that cell. Appending them after the table instead leaves them on a page
+    # of their own.
+    picture_cells: set[tuple[int, int]] = set()
+    for block, stream in images or []:
+        bbox = block.get("bbox") or (0, 0, 0, 0)
+        target = _table_cell_for_point(
+            detected,
+            widths,
+            ((float(bbox[0]) + float(bbox[2])) / 2, (float(bbox[1]) + float(bbox[3])) / 2),
+        )
+        if target is None:
+            continue
+        cell = table.cell(*target)
+        span = merge_span.get(target, 1)
+        cell_width = sum(widths[target[1] : target[1] + span])
+        picture_width = min(
+            max(12.0, cell_width - 4.0), max(12.0, float(bbox[2]) - float(bbox[0]))
+        )
+        paragraph = cell.paragraphs[0]
+        run = paragraph.add_run()
+        try:
+            run.add_picture(stream, width=Pt(picture_width))
+        except Exception:
+            continue
+        run.add_break(WD_BREAK.LINE)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        picture_cells.add(target)
+
     for row_index, row in enumerate(rows):
         for column_index in range(columns):
+            if (row_index, column_index) in covered:
+                continue
             value = row[column_index] if column_index < len(row) else ""
             cell = table.cell(row_index, column_index)
-            cell.width = Pt(widths[column_index])
+            span = merge_span.get((row_index, column_index), 1)
+            column_width = sum(widths[column_index : column_index + span])
+            cell.width = Pt(column_width)
             cell.vertical_alignment = (
                 WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 if label_values
                 else WD_CELL_VERTICAL_ALIGNMENT.TOP
             )
             lines = value.splitlines() or [""]
+            styled_lines = (
+                detected.cell_runs.get((row_index, column_index))
+                if not label_values
+                else None
+            )
             for line_index, line in enumerate(lines):
                 paragraph = (
                     cell.paragraphs[0]
@@ -2157,6 +2936,30 @@ def _add_table(
                 )
                 paragraph.paragraph_format.space_before = Pt(0)
                 paragraph.paragraph_format.space_after = Pt(0)
+
+                styled = (
+                    styled_lines[line_index]
+                    if styled_lines is not None and line_index < len(styled_lines)
+                    else None
+                )
+                if styled is not None and "".join(
+                    part[0] for part in styled
+                ) == line:
+                    # Keep the PDF's own weight per word: a bold label followed
+                    # by a SemiBold value stays two different runs instead of
+                    # one bolded line. Colour and size travel with each run, so
+                    # blue headings and the source font size survive as well.
+                    for text, bold, family, color, size in styled:
+                        if not text:
+                            continue
+                        run = paragraph.add_run(text)
+                        run.bold = bold
+                        if family:
+                            run.font.name = family
+                        if color:
+                            run.font.color.rgb = RGBColor.from_string(color)
+                        run.font.size = Pt(_word_font_size(size, table_size))
+                    continue
 
                 label = (
                     LABEL_COLON_RE.match(line.strip())
@@ -2169,10 +2972,10 @@ def _add_table(
                     # cell instead of letting Word place it after the label.
                     # A label too long for that stop would wrap, so leave it
                     # inline with its colon.
-                    if len(label_text) * 5.0 + 8 <= widths[column_index] - 12:
+                    if len(label_text) * 5.0 + 8 <= column_width - 12:
                         paragraph.paragraph_format.tab_stops.clear_all()
                         paragraph.paragraph_format.tab_stops.add_tab_stop(
-                            Pt(max(12.0, widths[column_index] - 6.0)),
+                            Pt(max(12.0, column_width - 6.0)),
                             WD_TAB_ALIGNMENT.RIGHT,
                         )
                         label_text += "\t:"
@@ -2186,7 +2989,18 @@ def _add_table(
                         run.bold = True
                     elif row_index == 0 and value and not label_values:
                         run.bold = True
-                run.font.size = Pt(9.5)
+                color, size = _dominant_cell_style(
+                    detected.cell_runs.get((row_index, column_index))
+                )
+                if color:
+                    run.font.color.rgb = RGBColor.from_string(color)
+                run.font.size = Pt(_word_font_size(size, table_size))
+
+    # A centred logo sits above centred text in the source.
+    for row_index, column_index in picture_cells:
+        for paragraph in table.cell(row_index, column_index).paragraphs:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
     document.add_paragraph()
     return table
 
@@ -2236,6 +3050,19 @@ def _prepare_image(
             image = ImageOps.exif_transpose(opened)
             if angle:
                 image = image.rotate(-angle, expand=True)
+            mask = block.get("mask") if isinstance(block, dict) else None
+            if mask:
+                # PDF transparency lives in a separate soft mask; without it
+                # the transparent area renders as solid black.
+                try:
+                    with Image.open(io.BytesIO(mask)) as alpha_opened:
+                        alpha = alpha_opened.convert("L")
+                    if alpha.size != image.size:
+                        alpha = alpha.resize(image.size)
+                    image = image.convert("RGBA")
+                    image.putalpha(alpha)
+                except Exception:
+                    pass
             if image.mode in ("RGBA", "LA") or (
                 image.mode == "P" and "transparency" in image.info
             ):

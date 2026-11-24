@@ -400,6 +400,29 @@ def _write_package(docx_path: Path, entries: dict[str, bytes]) -> None:
                 pass
 
 
+def has_embedded_fonts(docx_path: Path) -> bool:
+    """True when the package already carries at least one embedded face."""
+    try:
+        with zipfile.ZipFile(docx_path) as archive:
+            return any(
+                name.startswith("word/fonts/") for name in archive.namelist()
+            )
+    except Exception:
+        return False
+
+
+def ensure_embedded_fonts(docx_path: Path, pdf_path: Path) -> list[str]:
+    """Embed the PDF faces into ``docx_path`` unless it already carries them.
+
+    Used for results that were produced by an older build or reused from the
+    conversion cache, so a cached DOCX gets the same self-contained typography
+    as a freshly converted one.
+    """
+    if has_embedded_fonts(docx_path):
+        return []
+    return embed_pdf_fonts(docx_path, pdf_path)
+
+
 def embed_pdf_fonts(docx_path: Path, pdf_path: Path) -> list[str]:
     """Embed the PDF's TrueType faces used by ``docx_path``.
 
