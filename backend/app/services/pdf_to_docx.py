@@ -47,8 +47,14 @@ from PIL import Image, ImageOps
 from app.core.errors import ConversionError
 from app.services.base import ConversionContext, ConversionResult
 from app.services.capabilities import ocr_available
+from app.services.docx_fonts import FontMeasurer, embed_pdf_fonts
+from app.services.docx_speedups import install_table_cell_cache
 from app.services.ocr import ocr_pdf_page
 from app.services.pdf_ops import _open_pdf, MAX_PAGES
+
+# pdf2docx rebuilds the full cell grid for every table.cell() lookup; caching it
+# per table instance makes the layout engine about twice as fast on tables.
+install_table_cell_cache()
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 logger = logging.getLogger(__name__)
@@ -153,16 +159,26 @@ def _has_complex_table(
     vertical_positions: set[float] = set()
     for drawing in drawings:
         for item in drawing.get("items", []):
-            if item[0] != "l":
-                continue
-            start, end = item[1], item[2]
-            dx = abs(end.x - start.x)
-            dy = abs(end.y - start.y)
-            if dx >= page_width * 0.25 and dy <= 2:
-                long_horizontal += 1
-            elif dy >= page_height * 0.15 and dx <= 2:
-                long_vertical += 1
-                vertical_positions.add(round(start.x, 1))
+            if item[0] == "l":
+                start, end = item[1], item[2]
+                dx = abs(end.x - start.x)
+                dy = abs(end.y - start.y)
+                if dx >= page_width * 0.25 and dy <= 2:
+                    long_horizontal += 1
+                elif dy >= page_height * 0.15 and dx <= 2:
+                    long_vertical += 1
+                    vertical_positions.add(round(start.x, 1))
+            elif item[0] == "re":
+                # Many generators draw table rules as very thin filled
+                # rectangles instead of stroked lines. Ignoring them sent the
+                # page to PyMuPDF's ML table finder (0.3 s/page) even though
+                # the grid was already visible in the vector data.
+                rule = fitz.Rect(item[1])
+                if rule.width >= page_width * 0.25 and rule.height <= 3:
+                    long_horizontal += 1
+                elif rule.height >= page_height * 0.15 and rule.width <= 3:
+                    long_vertical += 1
+                    vertical_positions.add(round(rule.x0, 1))
     # Four or more vertical rules mean a wide multi-column grid. A
     # two-column label/value form only has three and is better rebuilt as a
     # native Word table, where the label column can keep its real width.
@@ -307,12 +323,21 @@ def _analyze_pages(doc: fitz.Document) -> list[PageInfo]:
         rect = page.rect
         page_area = max(rect.get_area(), 1.0)
 
-        text = page.get_text("text").strip()
         blocks = [
             block
             for block in page.get_text("dict").get("blocks", [])
             if block.get("type") in (0, 1)
         ]
+        # One text extraction per page instead of two: the dict already holds
+        # every span, so its character count is all the classifier needs.
+        text_length = 0
+        for block in blocks:
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text_length += len(span.get("text", ""))
+                text_length += 1  # newline between lines
 
         largest_image_area = 0.0
         large_visual_rects: list[fitz.Rect] = []
@@ -340,9 +365,9 @@ def _analyze_pages(doc: fitz.Document) -> list[PageInfo]:
                     # backgrounds are excluded so ordinary pages do not match.
                     if page_area * 0.03 <= drawing_rect.get_area() < page_area * 0.90:
                         large_visual_rects.append(drawing_rect)
-        complex_table = _has_complex_table(page, page_area, len(text), drawings)
+        complex_table = _has_complex_table(page, page_area, text_length, drawings)
         design_page = _is_design_page(
-            page_area, len(text), blocks, large_visual_rects
+            page_area, text_length, blocks, large_visual_rects
         )
         del drawings  # only the computed flags are needed later
 
@@ -351,7 +376,7 @@ def _analyze_pages(doc: fitz.Document) -> list[PageInfo]:
                 index=page_index,
                 width=float(rect.width),
                 height=float(rect.height),
-                text_length=len(text),
+                text_length=text_length,
                 blocks=blocks,
                 image_count=len(images),
                 dominant_image=dominant_image,
@@ -360,7 +385,7 @@ def _analyze_pages(doc: fitz.Document) -> list[PageInfo]:
                 design_page=design_page,
                 cls=_classify(
                     page_area,
-                    len(text),
+                    text_length,
                     largest_image_area,
                     images,
                     significant_vector,
@@ -839,6 +864,13 @@ def _set_tab_stop(paragraph, position: int) -> None:
 # begins with ':' can therefore be drawn on top of the cell border. Keep that
 # text just inside the border; the shift is under two points wide.
 BORDER_TEXT_INSET = Emu(45720)  # 0.05 inch
+
+# A label that ends exactly at its tab stop is enough for Word to skip the stop
+# and jump to its next 0.5-inch default tab. PDF forms frequently place the
+# colon column right after the longest label (the source font fits with no
+# spare space), so re-rendering in a substituted font pushes that one colon a
+# few points right. Give the shared label tab stop a little headroom.
+COLON_TAB_HEADROOM = Emu(45720)  # 0.05 inch
 UNSAFE_TAB_RESERVE = Emu(109728)  # 0.12 inch
 
 
@@ -907,7 +939,7 @@ def _align_colon_columns(document) -> bool:
             ]
             if not positions:
                 continue
-            target = Counter(positions).most_common(1)[0][0]
+            target = Counter(positions).most_common(1)[0][0] + COLON_TAB_HEADROOM
             unsafe = False
             for paragraph, _info in group:
                 width = _cell_text_width(paragraph)
@@ -926,6 +958,254 @@ def _align_colon_columns(document) -> bool:
                 if _rewrite_colon_paragraph(paragraph, colon, label_end):
                     _set_tab_stop(paragraph, target)
                     changed = True
+    return changed
+
+
+# A cell holding only a number (thousand separators, decimal marks, sign or
+# parentheses). Used to keep amounts on one line instead of wrapping them.
+NUMBER_CELL_RE = re.compile(r"^[-(]?[\d][\d.,\s]*[)]?$")
+# Preferred/never-exceeded shrink limits for an amount cell that does not fit
+# its column. Below the first limit the column is widened instead, below the
+# second the value is still shrunk rather than wrapping.
+MIN_NUMBER_SCALE = 0.8
+LAST_RESORT_NUMBER_SCALE = 0.6
+
+
+def _cell_side_margins_pt(cell) -> tuple[float, float]:
+    """Left/right cell margins in points (pdf2docx writes them as tcMar)."""
+    left = right = 0.0
+    properties = cell._tc.tcPr
+    if properties is None:
+        return left, right
+    for margin in properties.findall(qn("w:tcMar")):
+        for node in margin:
+            side = node.tag.rsplit("}", 1)[-1]
+            if side not in ("start", "left", "end", "right"):
+                continue
+            try:
+                value = float(node.get(qn("w:w")) or 0) / 20.0
+            except (TypeError, ValueError):
+                continue
+            if side in ("start", "left"):
+                left = max(left, value)
+            else:
+                right = max(right, value)
+    return left, right
+
+
+def _table_grid_widths_pt(table) -> list[float] | None:
+    """Column widths in points, or ``None`` when the grid cannot be resized."""
+    grid = table._tbl.tblGrid
+    if grid is None:
+        return None
+    columns = grid.findall(qn("w:gridCol"))
+    if not columns or len(columns) != len(table.columns):
+        return None
+    widths: list[float] = []
+    for column in columns:
+        try:
+            widths.append(float(column.get(qn("w:w")) or 0) / 20.0)
+        except (TypeError, ValueError):
+            return None
+    # A merged cell spans several grid columns; resizing them would change
+    # widths the cell does not own consistently, so leave those tables alone.
+    try:
+        if any(cell._tc.grid_span != 1 for row in table.rows for cell in row.cells):
+            return None
+    except AttributeError:
+        return None
+    return widths if all(width > 0 for width in widths) else None
+
+
+def _set_table_grid_widths(table, widths: list[float]) -> None:
+    for column, width in zip(table._tbl.tblGrid.findall(qn("w:gridCol")), widths):
+        column.set(qn("w:w"), str(max(1, round(width * 20))))
+    for row in table.rows:
+        for cell, width in zip(row.cells, widths):
+            cell.width = Pt(width)
+
+
+def _amount_cell_metrics(cell, measurer):
+    """Return ``(sized_runs, measured_pt, available_pt)`` for an amount cell."""
+    text = cell.text.strip()
+    if not text or "\n" in text or not NUMBER_CELL_RE.match(text):
+        return None
+    if sum(character.isdigit() for character in text) < 5:
+        return None
+    if len(cell.paragraphs) != 1:
+        return None
+    width = cell.width.pt if cell.width is not None else None
+    if not width:
+        return None
+    paragraph = cell.paragraphs[0]
+    runs = [run for run in paragraph.runs if run.text]
+    if not runs:
+        return None
+    margin_left, margin_right = _cell_side_margins_pt(cell)
+    indent_left = (paragraph.paragraph_format.left_indent or 0) / 12700
+    indent_right = (paragraph.paragraph_format.right_indent or 0) / 12700
+    available = width - margin_left - margin_right - indent_left - indent_right - 0.5
+    if available <= 8:
+        return None
+
+    sized: list[tuple[object, float, str]] = []
+    measured = 0.0
+    for run in runs:
+        size = (
+            run.font.size.pt
+            if run.font.size is not None
+            else (
+                paragraph.style.font.size.pt
+                if paragraph.style is not None and paragraph.style.font.size
+                else None
+            )
+        )
+        family = run.font.name or (
+            paragraph.style.font.name if paragraph.style is not None else None
+        )
+        if not size or not family:
+            return None
+        run_width = measurer.width(family, size, run.text)
+        if run_width is None:
+            return None
+        measured += run_width
+        sized.append((run, size, family))
+    return sized, measured, available
+
+
+def _number_scale(measurer, sized, available: float, min_scale: float) -> float | None:
+    """Largest scale >= ``min_scale`` whose measured width fits, else ``None``."""
+
+    def width_at(scale: float) -> float | None:
+        total = 0.0
+        for run, size, family in sized:
+            value = measurer.width(family, size * scale, run.text)
+            if value is None:
+                return None
+            total += value
+        return total
+
+    measured = width_at(1.0)
+    if measured is None:
+        return None
+    if measured <= available:
+        return 1.0
+    # FreeType rounds glyph advances, so scaling is not perfectly linear:
+    # step down until the real measured width fits.
+    scale = available / measured
+    while scale >= min_scale:
+        fitted = width_at(scale)
+        if fitted is not None and fitted <= available:
+            return scale
+        scale -= 0.01
+    return None
+
+
+def _apply_number_scale(sized, scale: float) -> None:
+    for run, size, _family in sized:
+        run.font.size = Pt(max(6.0, math.floor(size * scale * 10) / 10))
+
+
+def _fit_table_numbers(document, pdf_path: Path) -> bool:
+    """Keep amount cells on one line inside their column.
+
+    A long amount such as ``11,364,000,000`` only just fits its PDF column at
+    the source font size. Word/LibreOffice convert the column to twips and add
+    tiny rounding slack, so the value wraps after a comma and looks broken.
+    Measuring the string with the PDF's own face lets us either reduce that
+    one cell by a fraction of a point, or borrow a few points from the
+    neighbouring column when the shortfall is bigger. Renderers treat
+    ``w:noWrap`` and ``w:fitText`` differently, a size or width change is
+    honoured by both.
+    """
+    measurer = FontMeasurer(pdf_path)
+    pending: list[tuple[object, list[tuple[int, object, list, float, float]]]] = []
+    for table in document.tables:
+        items = []
+        for row in table.rows:
+            for column_index, cell in enumerate(row.cells):
+                metrics = _amount_cell_metrics(cell, measurer)
+                if metrics is None:
+                    continue
+                sized, measured, available = metrics
+                if measured > available:
+                    items.append((column_index, cell, sized, measured, available))
+        if items:
+            pending.append((table, items))
+    if not pending:
+        return False
+
+    changed = False
+    for table, items in pending:
+        unshrinkable = []
+        for column_index, cell, sized, measured, available in items:
+            scale = _number_scale(measurer, sized, available, MIN_NUMBER_SCALE)
+            if scale is None:
+                unshrinkable.append((column_index, cell, sized, measured, available))
+            elif scale < 1.0:
+                _apply_number_scale(sized, scale)
+                changed = True
+
+        gains: dict[int, float] = {}
+        widths = _table_grid_widths_pt(table)
+        if unshrinkable and widths is not None:
+            deficits: dict[int, float] = {}
+            for column_index, _cell, _sized, measured, available in unshrinkable:
+                deficits[column_index] = max(
+                    deficits.get(column_index, 0.0), measured - available
+                )
+            for column_index, deficit in deficits.items():
+                if column_index >= len(widths):
+                    continue
+                donors = [
+                    index
+                    for index in (column_index - 1, column_index + 1)
+                    if 0 <= index < len(widths)
+                ]
+                if not donors:
+                    continue
+                donor = max(donors, key=lambda index: widths[index])
+                # Give the amount column what it needs, but never take more
+                # than a quarter of the donor or leave it thinner than 54 pt.
+                give = min(deficit, widths[donor] * 0.25, widths[donor] - 54.0)
+                give = math.floor(give * 20) / 20
+                if give <= 0:
+                    continue
+                widths[donor] -= give
+                widths[column_index] += give
+                gains[column_index] = gains.get(column_index, 0.0) + give
+            if gains:
+                _set_table_grid_widths(table, widths)
+                changed = True
+
+        for column_index, _cell, sized, _measured, available in unshrinkable:
+            gain = gains.get(column_index, 0.0)
+            scale = _number_scale(
+                measurer, sized, available + gain, LAST_RESORT_NUMBER_SCALE
+            )
+            if scale is None or scale >= 1.0:
+                continue
+            _apply_number_scale(sized, scale)
+            changed = True
+    return changed
+
+
+def _relax_layout_row_heights(document) -> bool:
+    """Let table rows from the layout engine grow instead of clipping text.
+
+    pdf2docx pins every row to the exact height measured with the PDF's own
+    font. When that font is not installed, Word/LibreOffice substitute a font
+    with wider glyphs; the extra lines are then cropped or spill over the
+    neighbouring row, which makes the page look scrambled (Jumlah, Cost Center
+    and signature cells are typical victims). ``atLeast`` keeps the measured
+    height as a minimum and only grows the row when the text needs more room.
+    """
+    changed = False
+    for element in document.element.body.iter(qn("w:trHeight")):
+        if element.get(qn("w:hRule")) != "exact":
+            continue
+        element.set(qn("w:hRule"), "atLeast")
+        changed = True
     return changed
 
 
@@ -969,14 +1249,24 @@ def _convert_layout_mode(
         if section.orientation != desired:
             section.orientation = desired
             changed = True
+    numbers_fitted = _fit_table_numbers(document, ctx.input)
+    if numbers_fitted:
+        changed = True
     if _apply_layout_font_aliases(document):
         changed = True
     if _align_colon_columns(document):
         changed = True
     if _inset_border_colon_text(document):
         changed = True
+    if _relax_layout_row_heights(document):
+        changed = True
     if changed:
         document.save(output)
+
+    # Keep the PDF's own fonts inside the DOCX. Without them Word/LibreOffice
+    # substitute wider faces, and the tab stops, column widths and row heights
+    # measured from the PDF no longer fit the text.
+    embedded_fonts = embed_pdf_fonts(output, ctx.input)
 
     import zipfile
 
@@ -993,8 +1283,28 @@ def _convert_layout_mode(
         "Mode tata letak memakai pdf2docx: ukuran halaman, posisi teks, tabel, dan "
         "gambar dipertahankan. Teks tetap dapat diedit, tetapi disusun dalam kotak teks "
         "mengambang sehingga alur paragraf dapat berbeda dari mode edit.",
-        "Font PDF dipetakan ke font Word terdekat; font asli tidak disematkan.",
     ]
+    if embedded_fonts:
+        warnings.append(
+            "Font asli dari PDF disematkan ke dalam DOCX ("
+            + ", ".join(embedded_fonts[:6])
+            + ("…" if len(embedded_fonts) > 6 else "")
+            + "), sehingga Word dan LibreOffice memakai ukuran huruf yang sama dan "
+            "teks tidak bergeser karena font pengganti. Font yang disematkan adalah "
+            "potongan dari PDF, jadi karakter baru yang Anda ketik sendiri dapat "
+            "memakai font pengganti."
+        )
+    else:
+        warnings.append(
+            "Font asli PDF tidak dapat disematkan; Word memakai font terdekat yang "
+            "tersedia, sehingga posisi teks dapat sedikit bergeser."
+        )
+    if numbers_fitted:
+        warnings.append(
+            "Beberapa angka panjang disesuaikan agar tetap muat dalam satu baris di "
+            "kolomnya: ukuran font diperkecil sedikit dan/atau lebar kolom digeser "
+            "beberapa poin dari kolom sebelahnya."
+        )
     if scanned_pages:
         warnings.append(
             "Halaman "

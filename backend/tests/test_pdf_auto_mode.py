@@ -240,10 +240,11 @@ def test_layout_mode_aligns_label_colons_and_maps_carlito():
     assert pdf_to_docx._apply_layout_font_aliases(document) is True
     assert pdf_to_docx._align_colon_columns(document) is True
 
+    expected = 829310 + int(pdf_to_docx.COLON_TAB_HEADROOM)
     for paragraph in paragraphs:
         assert "\t:" in paragraph.text
         stops = [int(stop.position) for stop in paragraph.paragraph_format.tab_stops]
-        assert stops == [829310]
+        assert stops == [expected]
         assert all(run.font.name in (None, "Calibri") for run in paragraph.runs)
     assert paragraphs[1].text == "Tgl. Posting B\t: 29/04/2026"
     assert paragraphs[2].text == "No. Doc. SAP\t: 103514135"
@@ -281,10 +282,11 @@ def test_layout_colon_alignment_uses_tab_stop_without_tab_and_empty_values():
 
     assert pdf_to_docx._align_colon_columns(document) is True
 
+    expected = 834390 + int(pdf_to_docx.COLON_TAB_HEADROOM)
     for paragraph in paragraphs:
         assert "\t:" in paragraph.text
         stops = [int(stop.position) for stop in paragraph.paragraph_format.tab_stops]
-        assert stops == [834390]
+        assert stops == [expected]
     assert paragraphs[1].text == "Tgl. Posting B\t:"
     assert paragraphs[2].text == "No. Doc. SAP\t:"
 
@@ -449,6 +451,153 @@ def test_layout_value_cells_are_moved_off_the_border():
         )
     # A normal label cell is untouched.
     assert table.cell(0, 0).paragraphs[0].paragraph_format.left_indent is None
+
+
+def test_layout_amount_cells_shrink_instead_of_wrapping(tmp_path):
+    """A long amount that only just fit the PDF column must stay on one line."""
+    from docx import Document
+    from docx.shared import Pt
+
+    from app.services.docx_fonts import FontMeasurer
+    from tests.test_docx_fonts import _pdf_with_font, _vera_font
+
+    font = _vera_font()
+    if font is None:
+        pytest.skip("No TrueType test font available.")
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(_pdf_with_font(font))
+
+    document = Document()
+    table = document.add_table(rows=1, cols=2)
+    table.autofit = False
+    for index, width in enumerate((60, 68)):
+        table.columns[index].width = Pt(width)
+        table.cell(0, index).width = Pt(width)
+    cell = table.cell(0, 1)
+    run = cell.paragraphs[0].add_run("11,364,000,000")
+    run.font.name = "Bitstream Vera Sans"
+    run.font.size = Pt(10)
+
+    measured = FontMeasurer(pdf).width("Bitstream Vera Sans", 10, "11,364,000,000")
+    assert measured is not None and measured > 67
+
+    assert pdf_to_docx._fit_table_numbers(document, pdf) is True
+    size = cell.paragraphs[0].runs[0].font.size.pt
+    assert size < 10
+    fitted = FontMeasurer(pdf).width("Bitstream Vera Sans", size, "11,364,000,000")
+    assert fitted is not None and fitted <= 68
+
+
+def test_layout_large_amount_shortfall_widens_column(tmp_path):
+    """A shortfall too big for a small font tweak borrows width from the neighbour."""
+    from docx import Document
+    from docx.shared import Pt
+
+    from app.services.docx_fonts import FontMeasurer
+    from tests.test_docx_fonts import _pdf_with_font, _vera_font
+
+    font = _vera_font()
+    if font is None:
+        pytest.skip("No TrueType test font available.")
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(_pdf_with_font(font))
+
+    document = Document()
+    table = document.add_table(rows=1, cols=2)
+    table.autofit = False
+    for index, width in enumerate((120, 55)):
+        table.columns[index].width = Pt(width)
+        table.cell(0, index).width = Pt(width)
+    cell = table.cell(0, 1)
+    run = cell.paragraphs[0].add_run("11,364,000,000")
+    run.font.name = "Bitstream Vera Sans"
+    run.font.size = Pt(10)
+
+    assert pdf_to_docx._fit_table_numbers(document, pdf) is True
+    donor, amount = table.columns[0].width.pt, table.columns[1].width.pt
+    assert amount > 55 and donor < 120
+    assert round(donor + amount) == 175
+    assert cell.width.pt == amount
+    size = run.font.size.pt
+    fitted = FontMeasurer(pdf).width("Bitstream Vera Sans", size, "11,364,000,000")
+    assert fitted is not None and fitted <= amount - 0.4
+
+
+def test_layout_merged_tables_are_left_alone(tmp_path):
+    """Tables with merged cells keep their grid even when a value overflows."""
+    from docx import Document
+    from docx.shared import Pt
+
+    from tests.test_docx_fonts import _pdf_with_font, _vera_font
+
+    font = _vera_font()
+    if font is None:
+        pytest.skip("No TrueType test font available.")
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(_pdf_with_font(font))
+
+    document = Document()
+    table = document.add_table(rows=2, cols=2)
+    table.autofit = False
+    table.cell(0, 0).merge(table.cell(0, 1))
+    for index, width in enumerate((70, 40)):
+        table.columns[index].width = Pt(width)
+    cell = table.cell(1, 1)
+    cell.width = Pt(40)
+    run = cell.paragraphs[0].add_run("11,364,000,000")
+    run.font.name = "Bitstream Vera Sans"
+    run.font.size = Pt(10)
+
+    assert pdf_to_docx._table_grid_widths_pt(table) is None
+    pdf_to_docx._fit_table_numbers(document, pdf)
+    assert table.columns[0].width.pt == 70
+
+
+def test_layout_numbers_that_fit_are_left_alone(tmp_path):
+    from docx import Document
+    from docx.shared import Pt
+
+    from tests.test_docx_fonts import _pdf_with_font, _vera_font
+
+    font = _vera_font()
+    if font is None:
+        pytest.skip("No TrueType test font available.")
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(_pdf_with_font(font))
+
+    document = Document()
+    table = document.add_table(rows=1, cols=1)
+    table.autofit = False
+    table.columns[0].width = Pt(200)
+    table.cell(0, 0).width = Pt(200)
+    run = table.cell(0, 0).paragraphs[0].add_run("11,364,000,000")
+    run.font.name = "Bitstream Vera Sans"
+    run.font.size = Pt(10)
+
+    assert pdf_to_docx._fit_table_numbers(document, pdf) is False
+    assert run.font.size.pt == 10
+
+
+def test_layout_mode_relaxes_exact_row_heights():
+    """Substituted fonts need rows that can grow instead of clipping text."""
+    from docx import Document
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    document = Document()
+    table = document.add_table(rows=2, cols=1)
+    heights = []
+    for row, rule in zip(table.rows, ("exact", "atLeast")):
+        height = OxmlElement("w:trHeight")
+        height.set(qn("w:val"), "400")
+        height.set(qn("w:hRule"), rule)
+        row._tr.get_or_add_trPr().append(height)
+        heights.append(height)
+
+    assert pdf_to_docx._relax_layout_row_heights(document) is True
+    assert heights[0].get(qn("w:hRule")) == "atLeast"
+    assert heights[1].get(qn("w:hRule")) == "atLeast"
+    assert pdf_to_docx._relax_layout_row_heights(document) is False
 
 
 def test_layout_colon_alignment_skips_tab_stop_outside_cell():

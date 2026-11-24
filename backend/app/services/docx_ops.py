@@ -261,6 +261,9 @@ def docx_to_pdf(ctx: ConversionContext) -> ConversionResult:
     if libreoffice_available():
         try:
             output = convert_with_soffice(ctx.input, "pdf", ctx.workdir)
+            # LibreOffice can only use installed or embedded fonts; say so when
+            # the document relies on a face this host does not have.
+            warnings.extend(font_warnings(ctx.input, "LibreOffice"))
             return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
         except ConversionError as exc:
             if engine == "libreoffice":

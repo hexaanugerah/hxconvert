@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     libreoffice \
+    fontconfig \
     fonts-dejavu-core \
     fonts-liberation \
     fonts-crosextra-carlito \
@@ -34,6 +35,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# Source Sans Pro is not packaged by Debian bookworm, but SAP/SPPb-style PDFs
+# and Word files reference it by name. Ship the OFL-licensed faces so
+# LibreOffice uses them instead of substituting a wider fallback font.
+COPY assets/fonts/*.ttf /usr/share/fonts/truetype/source-sans-pro/
+RUN fc-cache -f
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local

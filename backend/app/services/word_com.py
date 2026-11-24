@@ -612,38 +612,58 @@ def _kill_process_tree(pid: int) -> None:
 
 
 @lru_cache(maxsize=1)
-def _installed_fonts() -> set[str]:
+def _installed_fonts() -> set[str] | None:
+    """Font families the local renderer can use, or None when unknown."""
     names: set[str] = set()
-    if not sys.platform.startswith("win"):
+    if sys.platform.startswith("win"):
+        import winreg
+
+        keys = (
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"),
+        )
+        for root, path in keys:
+            try:
+                with winreg.OpenKey(root, path) as key:
+                    index = 0
+                    while True:
+                        try:
+                            value_name, value_data, _ = winreg.EnumValue(key, index)
+                        except OSError:
+                            break
+                        index += 1
+                        for candidate in (value_name, str(value_data)):
+                            names.add(_normalise_font(candidate))
+            except OSError:
+                continue
+
+        fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        if fonts_dir.is_dir():
+            for entry in fonts_dir.iterdir():
+                if entry.suffix.lower() in {".ttf", ".otf", ".ttc"}:
+                    names.add(_normalise_font(entry.stem))
+        names.discard("")
         return names
-    import winreg
 
-    keys = (
-        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"),
-        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"),
-    )
-    for root, path in keys:
+    if sys.platform.startswith("linux"):
+        # LibreOffice resolves families through fontconfig.
         try:
-            with winreg.OpenKey(root, path) as key:
-                index = 0
-                while True:
-                    try:
-                        value_name, value_data, _ = winreg.EnumValue(key, index)
-                    except OSError:
-                        break
-                    index += 1
-                    for candidate in (value_name, str(value_data)):
-                        names.add(_normalise_font(candidate))
-        except OSError:
-            continue
-
-    fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
-    if fonts_dir.is_dir():
-        for entry in fonts_dir.iterdir():
-            if entry.suffix.lower() in {".ttf", ".otf", ".ttc"}:
-                names.add(_normalise_font(entry.stem))
-    names.discard("")
-    return names
+            completed = subprocess.run(
+                ["fc-list", "--format", "%{family}\n"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if completed.returncode != 0:
+            return None
+        for line in completed.stdout.splitlines():
+            for family in line.split(","):
+                names.add(_normalise_font(family))
+        names.discard("")
+        return names or None
+    return None
 
 
 def _normalise_font(name: str) -> str:
@@ -679,10 +699,8 @@ def _document_fonts(path: Path) -> set[str]:
     return {name for name in names if name}
 
 
-def font_warnings(path: Path) -> list[str]:
-    """Report fonts that Word will silently substitute."""
-    if not sys.platform.startswith("win"):
-        return []
+def font_warnings(path: Path, renderer: str = "Microsoft Word") -> list[str]:
+    """Report fonts that the renderer will silently substitute."""
     try:
         import zipfile
 
@@ -695,6 +713,8 @@ def font_warnings(path: Path) -> list[str]:
     if not used:
         return []
     installed = _installed_fonts()
+    if installed is None:
+        return []
     missing = []
     for font in sorted(used):
         normalised = _normalise_font(font)
@@ -708,7 +728,7 @@ def font_warnings(path: Path) -> list[str]:
     if not missing:
         return []
     return [
-        "Font berikut tidak tersedia di sistem sehingga Microsoft Word menggantinya: "
+        f"Font berikut tidak tersedia di sistem sehingga {renderer} menggantinya: "
         + ", ".join(missing[:10])
         + ". Penggantian font dapat mengubah panjang baris dan jumlah halaman."
     ]
