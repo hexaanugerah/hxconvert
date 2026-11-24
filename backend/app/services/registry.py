@@ -5,7 +5,7 @@ runtime so the API never advertises a tool the server cannot execute.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from app.core.errors import NotFoundError
@@ -53,6 +53,9 @@ class ToolOption:
     placeholder: str | None = None
     min: int | None = None
     max: int | None = None
+    # Hidden options keep working through the API for advanced callers but are
+    # not shown in the web UI (which stays deliberately simple).
+    hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,7 +112,7 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         id="pdf-to-word",
         label="PDF ke Word",
-        description="Konversi PDF menjadi DOCX yang dapat diedit dengan gambar dan tata letak dipertahankan.",
+        description="Konversi PDF menjadi DOCX secara otomatis: PDF berteks tetap bisa diedit, PDF bergambar dipertahankan sebagai gambar.",
         category="pdf",
         inputs=(".pdf",),
         output="docx",
@@ -122,21 +125,22 @@ TOOLS: tuple[ToolSpec, ...] = (
                 label="Mode konversi",
                 type="select",
                 default="auto",
+                hidden=True,
                 choices=(
                     {"value": "auto", "label": "Otomatis (Cerdas)"},
                     {"value": "fast", "label": "Cepat (gambar JPEG, tanpa analisis tata letak)"},
                     {"value": "layout", "label": "Prioritaskan tata letak"},
                     {"value": "editable", "label": "Prioritaskan pengeditan"},
-                    {"value": "full-image", "label": "Gambar penuh (tanpa OCR)"},
+                    {"value": "full-image", "label": "Seperti foto — halaman jadi gambar"},
                 ),
                 help=(
-                    "Otomatis: halaman scan jadi gambar, halaman teks jadi teks edit, campuran pakai tata letak. "
+                    "Otomatis: halaman scan dan dokumen desain/slide jadi gambar, halaman teks jadi teks edit, campuran pakai tata letak. "
                     "Cepat: setiap halaman dirender jadi JPEG 72 DPI tanpa analisis tata letak; "
                     "paling cocok untuk batch PDF besar, tetapi teks tidak dapat diedit dan "
                     "tampilan hanya sekualitas pratinjau. "
                     "Tata letak: pdf2docx mempertahankan posisi teks, gambar, grafik vektor. "
                     "Edit: ekstrak teks sebagai paragraf Word. "
-                    "Gambar penuh: setiap halaman dirender jadi gambar 300 DPI, tanpa OCR/ekstraksi teks."
+                    "Seperti foto: setiap halaman dirender jadi gambar 300 DPI sehingga tampilannya sama persis dengan PDF; tanpa OCR/ekstraksi teks."
                 ),
             ),
             ToolOption(
@@ -146,6 +150,7 @@ TOOLS: tuple[ToolSpec, ...] = (
                 default=72,
                 min=72,
                 max=200,
+                hidden=True,
                 help=(
                     "Hanya dipakai pada mode Cepat. 72 DPI adalah setelan tercepat "
                     "(pratinjau layar); naikkan ke 110-150 bila hasil perlu lebih tajam "
@@ -157,32 +162,36 @@ TOOLS: tuple[ToolSpec, ...] = (
                 label="Deteksi hasil pindai (OCR)",
                 type="select",
                 default="never",
+                hidden=True,
                 choices=(
                     {"value": "never", "label": "Jangan gunakan OCR"},
                     {"value": "always", "label": "Selalu gunakan OCR"},
                 ),
                 help="OCR hanya dijalankan saat dipilih 'Selalu gunakan OCR'. Default: tidak ada OCR otomatis.",
             ),
-            _LANG_OPTION,
+            replace(_LANG_OPTION, hidden=True),
             ToolOption(
                 name="page_breaks",
                 label="Pertahankan pemisah halaman",
                 type="checkbox",
                 default=False,
+                hidden=True,
             ),
             ToolOption(
                 name="tables",
                 label="Pertahankan tabel",
                 type="checkbox",
                 default=True,
+                hidden=True,
             ),
         ),
         processing_note=(
-            "Mode Otomatis: halaman scan tetap gambar, teks digital tetap teks. "
-            "Mode Cepat: semua halaman jadi JPEG beresolusi rendah tanpa analisis tata letak, "
-            "sehingga batch besar selesai jauh lebih cepat tetapi teks tidak dapat diedit. "
-            "Mode Gambar Penuh: semua halaman jadi gambar 300 DPI, tanpa OCR. "
-            "OCR tidak dijalankan otomatis."
+            "Serba otomatis: PDF berteks diubah menjadi Word yang bisa diedit. "
+            "PDF yang tampak seperti gambar (scan, foto, atau desain/slide) "
+            "dipertahankan sebagai gambar penuh per halaman sehingga tampilannya sama "
+            "persis dan hanya ukurannya yang bisa diubah. Tabel dan form mempertahankan "
+            "lebar kolom dari PDF; mesin konversi dipilih otomatis tanpa perlu memilih mode. "
+            "OCR tersedia terpisah di alat 'PDF Pindai ke Word (OCR)'."
         ),
     ),
     ToolSpec(
@@ -1227,6 +1236,7 @@ def tools_public() -> list[dict]:
                         "max": option.max,
                     }
                     for option in tool.options
+                    if not option.hidden
                 ],
             }
         )

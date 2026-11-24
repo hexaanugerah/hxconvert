@@ -106,6 +106,8 @@ export function Converter({ toolId }: { toolId: string }) {
   const [showPreview, setShowPreview] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const notified = useRef<string | null>(null);
+  const statusCard = useRef<HTMLElement | null>(null);
+  const scrolledJob = useRef<string | null>(null);
 
   const maxUploadMb = formatsQuery.data?.capabilities.limits.max_upload_mb ?? 200;
 
@@ -147,6 +149,19 @@ export function Converter({ toolId }: { toolId: string }) {
       notified.current = job.id;
       toast.error("Konversi gagal", { description: job.error_message ?? undefined });
     }
+  }, [job]);
+
+  // On small screens the finished result lives below the uploader, so bring the
+  // status card into view once instead of leaving the user on the file list.
+  useEffect(() => {
+    if (job?.status !== "completed" || scrolledJob.current === job.id) return;
+    scrolledJob.current = job.id;
+    if (window.matchMedia("(min-width: 1024px)").matches) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    statusCard.current?.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "start",
+    });
   }, [job]);
 
   const mutation = useMutation({
@@ -455,7 +470,7 @@ export function Converter({ toolId }: { toolId: string }) {
           </form>
         </div>
 
-        <aside className="space-y-4 lg:sticky lg:top-24">
+        <aside ref={statusCard} className="scroll-mt-20 space-y-4 lg:sticky lg:top-24">
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Status konversi</CardTitle>

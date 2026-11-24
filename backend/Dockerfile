@@ -20,6 +20,7 @@ WORKDIR /app
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     libpq5 \
     libgl1 \
     libglib2.0-0 \
@@ -46,14 +47,17 @@ COPY . .
 RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
 RUN mkdir -p /app/storage/inputs /app/storage/outputs /app/storage/tmp /app/storage/cache \
-    && chown -R app:app /app/storage
+    /data/storage/inputs /data/storage/outputs /data/storage/tmp /data/storage/cache \
+    && chown -R app:app /app/storage /data
 USER app
 
 # Expose port
 EXPOSE 8000
 
 # Run migrations then start server.
-# --workers 2: each uvicorn worker owns its own persistent process pool for
-# batch conversions (CPU-bound children), so 4 workers multiplies RAM needs;
-# 2 is the safe default for a single conversion host.
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"]
+# UVICORN_WORKERS defaults to 2: each uvicorn worker owns its own persistent
+# process pool for batch conversions (CPU-bound children), so more workers
+# multiply RAM needs. PaaS platforms (Railway) should set UVICORN_WORKERS=1 and
+# let CONVERSION_WORKERS provide the parallelism. PORT is provided by the
+# platform; proxy headers make download URLs and cookies use HTTPS correctly.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${UVICORN_WORKERS:-2} --proxy-headers --forwarded-allow-ips='*'"]

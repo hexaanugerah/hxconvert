@@ -65,18 +65,27 @@ chmod +x deploy.sh
 - Visit `https://HXconvert.com`
 - API docs at `https://HXconvert.com/api/v1/docs`
 
-### Option 2: Railway (Easiest PaaS)
+### Option 2: Vercel + Railway + TiDB Cloud
 
-1. Push to GitHub
-2. Connect Railway to repo
-3. Add PostgreSQL plugin
-4. Set environment variables in Railway dashboard:
-   - `DATABASE_URL` (auto from PostgreSQL plugin)
-   - `SECRET_KEY` (generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"`)
-   - `CORS_ORIGINS` (your frontend domain)
-   - `ENVIRONMENT=production`
-   - `ALLOW_ANONYMOUS=false`
-5. Deploy!
+Split deployment: Next.js on Vercel, FastAPI on Railway, and TiDB Cloud
+(MySQL-compatible) for metadata. This keeps the heavy LibreOffice/Tesseract
+image off Vercel and needs no server to manage.
+
+Full runbook: [`docs/DEPLOY_VERCEL_RAILWAY_TIDB.md`](docs/DEPLOY_VERCEL_RAILWAY_TIDB.md).
+
+1. Create a TiDB Cloud Starter instance, a database, and a URL-encoded
+   `DATABASE_URL` (`mysql+pymysql://...`).
+2. Railway: deploy the repo with **Root Directory** `backend`, attach a volume
+   at `/data`, set `STORAGE_DIR=/data/storage`, `RAILWAY_RUN_UID=0`,
+   `UVICORN_WORKERS=1`, `DATABASE_SSL=true`, and a random `SECRET_KEY`.
+3. Vercel: import the repo with **Root Directory** `frontend` and set
+   `BACKEND_URL` to the Railway domain so `/api/*` is proxied same-origin
+   (cookies stay first-party). Leave `NEXT_PUBLIC_API_URL` unset.
+4. Verify `https://<project>.vercel.app/api/v1/health` and run a batch
+   conversion from the browser.
+
+> Railway runs one replica only: background jobs and uploaded files live on the
+> attached volume, not in TiDB.
 
 ### Option 3: Render
 

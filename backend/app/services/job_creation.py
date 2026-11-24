@@ -9,9 +9,9 @@ from fastapi import Request, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.errors import AuthError, UnsupportedFormatError, ValidationAppError
+from app.core.errors import UnsupportedFormatError, ValidationAppError
+from app.core.security import AuthError, get_or_create_guest_id
 from app.core.timing import log_stage
-from app.core.security import get_or_create_guest_id
 from app.core.storage import (
     extension_of,
     job_input_dir,
@@ -114,7 +114,7 @@ async def create_job(
                 )
             destination = input_dir / stored_name(upload.filename)
             log_start = time.perf_counter()
-            written = await save_upload(upload, destination)
+            written, digest = await save_upload(upload, destination)
             log_stage(
                 "upload_file",
                 (time.perf_counter() - log_start) * 1000,
@@ -135,6 +135,7 @@ async def create_job(
                 {
                     "stored": destination.name,
                     "original": (upload.filename or destination.name)[:255],
+                    "sha256": digest,
                 }
             )
         if not entries:

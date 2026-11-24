@@ -88,3 +88,7 @@ frontend/public/pdf.worker.min.mjs
 
 # Environment-specific benchmark output
 backend/benchmark_results_*.json
+
+# Deployment CLI state (project links, local overrides)
+.vercel/
+.railway/

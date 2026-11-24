@@ -98,7 +98,7 @@ def test_batch_handler_none_falls_back_per_file(tmp_path, monkeypatch):
 
     converted: list[int] = []
 
-    def fake_convert_one(index, input_path, original_name, tool, options, workdir):
+    def fake_convert_one(index, input_path, original_name, handler, options, workdir):
         converted.append(index)
         output = _write_pdf(workdir / f"file_{index}" / "out.pdf")
         return BatchFileResult(
@@ -172,9 +172,10 @@ def test_duplicate_files_convert_once(tmp_path, monkeypatch):
 
     def handler(ctx: ConversionContext) -> ConversionResult:
         calls.append(ctx.input)
+        name = f"{ctx.input.stem}.pdf"
         return ConversionResult(
-            _write_pdf(ctx.workdir / "out.pdf"),
-            "out.pdf",
+            _write_pdf(ctx.workdir / name),
+            name,
             "application/pdf",
         )
 
@@ -210,3 +211,67 @@ def test_duplicate_files_convert_once(tmp_path, monkeypatch):
     assert result.successful == 3
     assert result.failed == 0
     assert all(item.success for item in result.file_results)
+
+    # Reused duplicates keep their own download name instead of inheriting
+    # the first file's output name.
+    by_name = {item.original_name: item for item in result.file_results}
+    assert by_name["a.pdf"].output_filename == "a.pdf"
+    assert by_name["b.pdf"].output_filename == "b.pdf"
+    assert by_name["c.pdf"].output_filename == "c.pdf"
+    assert by_name["b.pdf"].output_path != by_name["a.pdf"].output_path
+
+
+def test_upload_digests_skip_hashing_and_still_reuse_duplicates(tmp_path, monkeypatch):
+    """Upload-time digests are used directly; the files are never read again."""
+    calls: list[Path] = []
+
+    def handler(ctx: ConversionContext) -> ConversionResult:
+        calls.append(ctx.input)
+        return ConversionResult(
+            _write_pdf(ctx.workdir / "out.pdf"),
+            "out.pdf",
+            "application/pdf",
+        )
+
+    def forbidden(_paths):  # pragma: no cover - must never run
+        raise AssertionError("files with upload digests must not be hashed again")
+
+    tool = ToolSpec(
+        id="fake-pdf",
+        label="Fake PDF",
+        description="",
+        category="pdf",
+        inputs=(".pdf",),
+        output="pdf",
+        handler=handler,
+    )
+    monkeypatch.setattr(batch_conversion, "get_tool", lambda _: tool)
+    monkeypatch.setattr(batch_conversion, "_worker_count", lambda: 1)  # keep the run inline
+    monkeypatch.setattr(batch_conversion, "job_output_dir", lambda bid: tmp_path / bid)
+    monkeypatch.setattr(batch_conversion, "_hash_files", forbidden)
+
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    same_a = inputs_dir / "a.pdf"
+    same_b = inputs_dir / "b.pdf"
+    other = inputs_dir / "c.pdf"
+    same_a.write_bytes(b"identical-pdf-bytes")
+    same_b.write_bytes(b"identical-pdf-bytes")
+    other.write_bytes(b"different-pdf-bytes")
+    inputs = [same_a, same_b, other]
+    names = [path.name for path in inputs]
+    digests = ["0" * 64, "0" * 64, "1" * 64]
+
+    result = process_batch_conversion(
+        "batch-digests",
+        "fake-pdf",
+        inputs,
+        names,
+        {},
+        tmp_path / "work",
+        digests=digests,
+    )
+
+    assert len(calls) == 2  # a & b share one conversion
+    assert result.successful == 3
+    assert result.failed == 0

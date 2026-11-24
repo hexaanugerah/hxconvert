@@ -29,9 +29,9 @@ tidak tersedia ditandai **tidak tersedia** beserta alasannya.
 | PowerPoint | PPTX → PDF/gambar **(memerlukan LibreOffice)** |
 | Gambar & OCR | Konversi JPG/PNG/WebP, gambar → PDF, OCR gambar, PDF pindai → DOCX |
 | Keamanan berkas | Validasi isi (magic bytes), nama acak, batas ukuran/jumlah, timeout, akses per pemilik, retensi |
-| Pengujian | 78 tes backend lulus (termasuk fidelitas gambar/Word, multi-halaman, pratinjau, batch, alat PDF/gambar baru, konversi nyata, dan kontrol akses) |
+| Pengujian | 116 tes backend lulus (termasuk fidelitas gambar/Word, multi-halaman, pratinjau, batch, alat PDF/gambar baru, konversi nyata, dan kontrol akses) |
 | Build frontend | `tsc --noEmit` dan `next build` (standalone) lulus |
-| Deployment | Docker Compose produksi (Postgres, nginx, certbot) + panduan di `DEPLOYMENT.md` |
+| Deployment | Docker Compose produksi (Postgres, nginx, certbot) + opsi Vercel/Railway/TiDB Cloud di `docs/DEPLOY_VERCEL_RAILWAY_TIDB.md` |
 | Verifikasi UI | Konversi PDF→Word diuji melalui browser headless terhadap backend asli |
 
 ### Keterbatasan lingkungan saat ini
@@ -327,7 +327,11 @@ cp .env.production.template .env.production   # isi semua nilai
 ./deploy.sh production
 ```
 
-Detail lengkap ada di `DEPLOYMENT.md`. Untuk menjalankan manual tanpa Docker:
+Detail lengkap ada di `DEPLOYMENT.md`. Deploy terpisah tanpa VPS: frontend di
+Vercel, backend di Railway (Docker + volume), database TiDB Cloud — lihat
+`docs/DEPLOY_VERCEL_RAILWAY_TIDB.md`.
+
+Untuk menjalankan manual tanpa Docker:
 
 ```powershell
 cd frontend

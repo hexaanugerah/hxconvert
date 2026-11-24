@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 import logging
-import threading
 import time
 
 from fastapi import FastAPI, Request
@@ -14,7 +13,7 @@ from sqlalchemy import text
 from app.api.v1 import auth, conversions, pdf, tools
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
-from app.core.errors import register_exception_handlers
+from app.core.error_handlers import register_exception_handlers
 from app.schemas.conversion import HealthOut
 from app.services.batch_conversion import warm_cpu_pool
 from app.services.capabilities import capabilities_snapshot
@@ -39,11 +38,14 @@ async def lifespan(app: FastAPI):
     except Exception:  # pragma: no cover
         logger.exception("Initial expiry cleanup failed")
     task = asyncio.create_task(cleanup_loop())
-    # Start the conversion worker processes in the background so the first
-    # batch does not pay their spawn/import cost while a user waits.
-    threading.Thread(
-        target=warm_cpu_pool, name="warm-conversion-pool", daemon=True
-    ).start()
+    # Warm the conversion workers before accepting requests so the first
+    # batch does not pay their spawn/import cost while a user waits. Tests
+    # skip this: each test builds its own client and does not need a pool.
+    if settings.environment != "test":
+        try:
+            await asyncio.to_thread(warm_cpu_pool)
+        except Exception:  # pragma: no cover - a broken pool must not stop the API
+            logger.exception("Conversion pool warmup failed")
     logger.info(
         "HXconvertX API started (environment=%s, OCR=%s, LibreOffice=%s)",
         settings.environment,

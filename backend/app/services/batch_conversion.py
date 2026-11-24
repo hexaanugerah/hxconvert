@@ -92,14 +92,19 @@ def _worker_count() -> int:
     """Bounded pool: an idle pool wastes nothing, and running every file at
     once only slows down CPU-bound converters through context switching.
 
-    ``settings.conversion_workers <= 0`` means auto: one worker less than the
-    core count, which keeps the machine responsive while using all of them.
+    ``settings.conversion_workers <= 0`` means auto: half the cores, capped at
+    six, which leaves headroom for the request handler and OCR subprocesses.
+    On containers with a CPU quota, set ``CONVERSION_WORKERS`` explicitly
+    because ``os.cpu_count()`` can report the host's cores.
     """
     configured = int(settings.conversion_workers or 0)
     if configured <= 0:
-        # Auto: use the cores but cap the pool so heavy 300 DPI renders per
-        # worker cannot exhaust RAM on machines with many small cores.
-        return max(1, min(6, (os.cpu_count() or 2) - 1))
+        # Auto: half the cores, capped at six. Four workers on an 8-core
+        # machine finish a 15 x 100 KB batch in ~2.5 s while keeping pool
+        # startup and memory low; spawning one worker per core cost seconds of
+        # startup and bought little for small documents.
+        cores = os.cpu_count() or 2
+        return max(1, min(6, max(2, cores // 2)))
     return max(1, min(configured, os.cpu_count() or 2))
 
 
@@ -112,10 +117,23 @@ _CPU_POOL_LOCK = threading.Lock()
 
 def _pool_init() -> None:
     """Pre-import the heavy conversion libraries in each pool worker so the
-    first file of a batch does not pay their import cost."""
+    first file of a batch does not pay their import cost.
+
+    ``pdfplumber`` (table detection, editable PDF -> Word) and the PDF -> Word
+    handler module are imported here as well: importing them lazily on the
+    first submitted file added seconds to the first batch, because every worker
+    paid it while the user was waiting. Each worker imports only the modules
+    the submitted handler needs; importing the whole service registry here
+    (which pulls openpyxl, python-pptx, xhtml2pdf and friends into every
+    process) made pool startup slower than the conversions it was meant to
+    accelerate.
+    """
     import docx  # noqa: F401
     import fitz  # noqa: F401
+    import pdfplumber  # noqa: F401
     from PIL import Image  # noqa: F401
+
+    from app.services import pdf_to_docx  # noqa: F401
 
 
 def _pool_ready(barrier: Any | None = None) -> int:
@@ -205,6 +223,27 @@ def _hash_file(path: Path) -> str | None:
     except OSError:
         return None
     return digest.hexdigest()
+
+
+def _hash_files(paths: list[Path]) -> dict[int, str]:
+    """Hash files concurrently.
+
+    New jobs arrive with digests computed during upload. This fallback is for
+    legacy jobs and direct API calls: hashing 15 small files sequentially took
+    seconds on Windows when the files were first read, while the conversions
+    themselves were faster, so the reads run in parallel here.
+    """
+    if not paths:
+        return {}
+    workers = max(1, min(_worker_count(), len(paths), 8))
+    results: dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="batch-hash") as pool:
+        futures = {pool.submit(_hash_file, path): index for index, path in enumerate(paths)}
+        for future in as_completed(futures):
+            digest = future.result()
+            if digest is not None:
+                results[futures[future]] = digest
+    return results
 
 
 def _zip_method(ext: str) -> tuple[int, int]:
@@ -527,11 +566,16 @@ def _convert_one(
     index: int,
     input_path: Path,
     original_name: str,
-    tool: ToolSpec,
+    handler: Callable[[ConversionContext], ConversionResult],
     options: dict[str, Any],
     workdir: Path,
 ) -> BatchFileResult:
-    """Convert exactly one file; never raises (failures become results)."""
+    """Convert exactly one file; never raises (failures become results).
+
+    Only the handler callable is sent to the worker, not the whole ``ToolSpec``:
+    unpickling a ToolSpec imports the registry module and every conversion
+    service, which cost seconds per worker before the first file converted.
+    """
     ctx = ConversionContext(
         inputs=[input_path],
         original_names=[original_name],
@@ -541,7 +585,7 @@ def _convert_one(
     ctx.workdir.mkdir(parents=True, exist_ok=True)
 
     try:
-        result = tool.handler(ctx)
+        result = handler(ctx)
 
         if result.path.exists() and result.path.stat().st_size > 0:
             return BatchFileResult(
@@ -588,13 +632,15 @@ def _convert_indices(
     if not indices:
         return results
 
+    handler = tool.handler
+
     def inline(missing: list[int]) -> None:
         for index in missing:
             results[index] = _convert_one(
                 index,
                 input_files[index],
                 original_names[index],
-                tool,
+                handler,
                 options,
                 workdir,
             )
@@ -617,7 +663,7 @@ def _convert_indices(
                         index,
                         input_files[index],
                         original_names[index],
-                        tool,
+                        handler,
                         options,
                         workdir,
                     )
@@ -646,7 +692,7 @@ def _convert_indices(
                 index,
                 input_files[index],
                 original_names[index],
-                tool,
+                handler,
                 options,
                 workdir,
             ): index
@@ -690,13 +736,16 @@ def process_batch_conversion(
     options: dict[str, Any],
     workdir: Path,
     on_stage: Callable[[str], None] | None = None,
+    digests: list[str | None] | None = None,
 ) -> BatchConversionResult:
     """
     Process a batch conversion of multiple files.
 
     Independent files run in a bounded worker pool (CPU/RAM aware). Results are
     collected in the original upload order and a ZIP archive is created when
-    multiple files succeed.
+    multiple files succeed. ``digests`` are SHA-256 values computed while the
+    uploads were written; when supplied, duplicate detection needs no extra
+    read of the source files.
     """
     tool = get_tool(tool_id)
     workers = _worker_count()
@@ -733,13 +782,21 @@ def process_batch_conversion(
 
     duplicate_rep: dict[int, int] = {}
     if len(pending) > 1:
-        # Identical files are converted once and their results reused. Uploading
-        # the same document several times in one job must not pay for the work
-        # more than once (hashing is streamed and far cheaper than converting).
+        # Identical files are converted once and their results reused. New jobs
+        # arrive with upload-time digests; only files missing one are read here.
+        known: dict[int, str | None] = {}
+        if digests is not None and len(digests) == len(input_files):
+            known = {index: digests[index] for index in pending}
+        missing = [index for index in pending if not known.get(index)]
+        if missing:
+            computed = _hash_files([input_files[index] for index in missing])
+            for position, index in enumerate(missing):
+                known[index] = computed.get(position)
+
         seen_digests: dict[str, int] = {}
         for index in pending:
-            digest = _hash_file(input_files[index])
-            if digest is None:
+            digest = known.get(index)
+            if not digest:
                 continue
             first_index = seen_digests.setdefault(digest, index)
             if first_index != index:
@@ -770,12 +827,22 @@ def process_batch_conversion(
             and rep_result.output_path
             and rep_result.output_path.exists()
         ):
+            # The clone shares the representative's bytes, but its download
+            # name must follow its own source name. Inheriting the
+            # representative's filename made every duplicate download appear
+            # as the first file (e.g. fifteen "batch-01.docx" entries).
+            suffix = Path(
+                rep_result.output_filename or rep_result.output_path.name
+            ).suffix
+            base = sanitize_filename(Path(original_names[clone]).stem) or (
+                f"berkas_{clone + 1}"
+            )
             file_results[clone] = BatchFileResult(
                 index=clone,
                 original_name=original_names[clone],
                 success=True,
                 output_path=rep_result.output_path,
-                output_filename=rep_result.output_filename,
+                output_filename=f"{base}{suffix}",
                 output_mime=rep_result.output_mime,
                 warnings=rep_result.warnings,
             )

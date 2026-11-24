@@ -1,6 +1,7 @@
 """Storage layout, secure file writes and path containment checks."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -66,11 +67,13 @@ def stored_name(original: str | None) -> str:
 
 
 def write_input_manifest(job_id: str, entries: list[dict[str, str]]) -> None:
-    """Record upload order and original names next to the stored files.
+    """Record upload order, original names and content digests next to the files.
 
     Stored filenames are random UUIDs, so directory iteration order does not
     reflect the order the user selected the files in. The manifest is the
-    authoritative order used by the worker.
+    authoritative order used by the worker. The SHA-256 digest is computed
+    while the upload is written, which avoids a second (expensive) read of
+    every file just to detect duplicates in a batch.
     """
     path = job_input_dir(job_id) / INPUT_MANIFEST
     path.write_text(json.dumps({"files": entries}, ensure_ascii=False), encoding="utf-8")
@@ -92,7 +95,11 @@ def read_input_manifest(job_id: str) -> list[dict[str, str]]:
             continue
         stored = str(item.get("stored") or "")
         if stored and Path(stored).name == stored:
-            entries.append({"stored": stored, "original": str(item.get("original") or stored)})
+            entry = {"stored": stored, "original": str(item.get("original") or stored)}
+            digest = str(item.get("sha256") or "")
+            if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest):
+                entry["sha256"] = digest
+            entries.append(entry)
     return entries
 
 
@@ -149,11 +156,13 @@ def _office_kind(path: Path) -> str | None:
     return None
 
 
-async def save_upload(upload: UploadFile, destination: Path) -> int:
+async def save_upload(upload: UploadFile, destination: Path) -> tuple[int, str]:
     """Stream an upload to disk while enforcing the configured size limit.
 
-    Returns the number of bytes written. Raises and removes the file on any
-    validation failure. Validation inspects file content, not just the name.
+    Returns ``(bytes_written, sha256_hex)``. The digest is computed from the
+    same chunks that are written, so batch duplicate detection costs no extra
+    disk read later. Raises and removes the file on any validation failure.
+    Validation inspects file content, not just the name.
     """
     ext = extension_of(upload.filename)
     if ext not in ALLOWED_EXTENSIONS:
@@ -165,6 +174,7 @@ async def save_upload(upload: UploadFile, destination: Path) -> int:
     destination.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     head = b""
+    digest = hashlib.sha256()
     try:
         with destination.open("wb") as handle:
             while chunk := await upload.read(1024 * 1024):
@@ -176,6 +186,7 @@ async def save_upload(upload: UploadFile, destination: Path) -> int:
                         f"File exceeds the {settings.max_upload_mb} MB limit.",
                         details={"filename": sanitize_filename(upload.filename)},
                     )
+                digest.update(chunk)
                 handle.write(chunk)
     except Exception:
         destination.unlink(missing_ok=True)
@@ -198,4 +209,4 @@ async def save_upload(upload: UploadFile, destination: Path) -> int:
                 f"'{sanitize_filename(upload.filename)}' is not a valid {ext.upper().lstrip('.')} file."
             )
 
-    return total
+    return total, digest.hexdigest()

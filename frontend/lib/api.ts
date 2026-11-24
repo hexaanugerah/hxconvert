@@ -1,10 +1,17 @@
 import type { ApiErrorBody } from "@/types";
 
 function resolveApiUrl(): string {
-  const configured = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
-  if (typeof window === "undefined") return configured;
+  const configured = process.env.NEXT_PUBLIC_API_URL;
+  // Unset on Vercel = same-origin "/api" through the rewrite proxy configured
+  // in next.config.ts. Local development keeps the direct backend URL.
+  if (configured === undefined) {
+    return process.env.NODE_ENV === "production" ? "" : "http://127.0.0.1:8000";
+  }
+  const trimmed = configured.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (typeof window === "undefined") return trimmed;
   try {
-    const target = new URL(configured);
+    const target = new URL(trimmed);
     const pageHost = window.location.hostname;
     const isLocalHost = (host: string) =>
       host === "localhost" || host === "127.0.0.1" || host === "::1";
@@ -18,7 +25,7 @@ function resolveApiUrl(): string {
   } catch {
     // malformed URL: fall through and use the configured value as-is
   }
-  return configured;
+  return trimmed;
 }
 
 export const API_URL = resolveApiUrl();

@@ -4,11 +4,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.errors import AuthError, ConflictError, ValidationAppError
+from app.core.errors import ConflictError, ValidationAppError
 from app.core.rate_limit import enforce_rate_limit
 from app.core.security import (
     ACCESS_COOKIE,
     GUEST_COOKIE,
+    AuthError,
+    cookie_options,
     create_access_token,
     get_current_user,
     get_optional_user,
@@ -30,15 +32,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _set_auth_cookie(response: Response, token: str) -> None:
-    is_production = settings.environment == "production"
     response.set_cookie(
         ACCESS_COOKIE,
         token,
         max_age=settings.access_token_expire_minutes * 60,
-        httponly=True,
-        samesite="lax" if is_production else "none",
-        secure=is_production,
-        path="/",
+        **cookie_options(),
     )
 
 

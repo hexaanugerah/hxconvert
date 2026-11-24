@@ -74,6 +74,22 @@ def get_current_user(user: User | None = Depends(get_optional_user)) -> User:
     return user
 
 
+def cookie_options() -> dict:
+    """Shared Set-Cookie attributes for guest and auth cookies.
+
+    ``COOKIE_SAMESITE=lax`` works for local development, the Vercel rewrite
+    proxy, and custom domains under one apex. Use ``none`` only when the
+    browser calls the API on a different site directly; it is automatically
+    paired with ``Secure`` because browsers reject it otherwise.
+    """
+    return {
+        "httponly": True,
+        "samesite": settings.cookie_samesite,
+        "secure": settings.cookie_is_secure,
+        "path": "/",
+    }
+
+
 def get_or_create_guest_id(request: Request, response=None) -> str | None:
     """Return the caller's anonymous session id, or None when anonymous use is disabled."""
     if not settings.allow_anonymous:
@@ -87,22 +103,10 @@ def get_or_create_guest_id(request: Request, response=None) -> str | None:
             pass
     guest_id = str(uuid.uuid4())
     if response is not None:
-        # For development (HTTP), use SameSite=none without Secure to allow cross-origin cookies.
-        # Browsers allow this on localhost. For production (HTTPS), use SameSite=lax with Secure.
-        is_production = settings.environment == "production"
-        # SameSite=None without Secure is INVALID and browsers drop the whole
-        # cookie, which silently broke guest job access in development. The
-        # frontend now always calls the API on the page's own host (see
-        # lib/api.ts), so the pairing stays same-site and plain SameSite=Lax
-        # works over HTTP in development and over HTTPS with Secure in
-        # production (same domain behind the reverse proxy).
         response.set_cookie(
             GUEST_COOKIE,
             guest_id,
             max_age=60 * 60 * 24 * 30,
-            httponly=True,
-            samesite="lax",
-            secure=is_production,
-            path="/",
+            **cookie_options(),
         )
     return guest_id

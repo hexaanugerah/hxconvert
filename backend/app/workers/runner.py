@@ -51,27 +51,30 @@ def _fail(db, job: ConversionJob, message: str, log_message: str | None = None) 
     db.commit()
 
 
-def _ordered_inputs(job_id: str) -> tuple[list, list[str]]:
+def _ordered_inputs(job_id: str) -> tuple[list, list[str], list[str | None]]:
     """Return uploaded files in the order the user selected them.
 
     Stored names are random UUIDs, so ``iterdir`` order is meaningless. The
     manifest written during upload is authoritative; legacy jobs fall back to
-    a sorted listing.
+    a sorted listing. Content digests are returned alongside the files so a
+    batch does not have to re-read every upload before converting it.
     """
     input_dir = job_input_dir(job_id)
     manifest = read_input_manifest(job_id)
     inputs = []
     original_names: list[str] = []
+    digests: list[str | None] = []
     for entry in manifest:
         path = input_dir / entry["stored"]
         if path.is_file():
             inputs.append(path)
             original_names.append(entry["original"])
+            digests.append(entry.get("sha256"))
     if inputs:
-        return inputs, original_names
+        return inputs, original_names, digests
 
     legacy = sorted(path for path in input_dir.iterdir() if path.is_file())
-    return legacy, [path.name for path in legacy]
+    return legacy, [path.name for path in legacy], [None] * len(legacy)
 
 
 def _run_single_conversion(
@@ -239,7 +242,7 @@ def run_conversion_job(job_id: str) -> None:
             _fail(db, job, reason or "This tool is unavailable.", "Tool unavailable at execution time.")
             return
 
-        inputs, original_names = _ordered_inputs(job.id)
+        inputs, original_names, digests = _ordered_inputs(job.id)
         if not inputs:
             _fail(db, job, "Berkas yang diunggah sudah tidak tersedia. Silakan unggah ulang.")
             return
@@ -351,6 +354,7 @@ def run_conversion_job(job_id: str) -> None:
                         options=options,
                         workdir=workdir,
                         on_stage=_stage,
+                        digests=digests,
                     ),
                     job_id=job_id,
                     tool=job.tool,

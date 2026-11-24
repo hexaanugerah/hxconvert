@@ -3,19 +3,17 @@ import sys
 from pathlib import Path
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import settings  # noqa: E402
-from app.core.database import Base  # noqa: E402
+from app.core.database import Base, engine  # noqa: E402
 import app.models  # noqa: E402,F401  (register models)
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 target_metadata = Base.metadata
 
 
@@ -32,12 +30,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    with connectable.connect() as connection:
+    # Reuse the application engine so TiDB TLS settings and the MySQL
+    # connect_args from app.core.database also apply to migrations. A separate
+    # engine_from_config() here would connect without TLS and fail on TiDB.
+    with engine.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
