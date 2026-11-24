@@ -8,6 +8,7 @@ import {
   FileClock,
   Loader2,
   RefreshCw,
+  ScanEye,
   Search,
   Trash2,
   XCircle,
@@ -157,6 +158,7 @@ export default function HistoryPage() {
               <option value="processing">Diproses</option>
               <option value="queued">Menunggu</option>
               <option value="failed">Gagal</option>
+              <option value="cancelled">Dibatalkan</option>
               <option value="expired">Kedaluwarsa</option>
             </Select>
           </div>
@@ -222,6 +224,13 @@ export default function HistoryPage() {
                       <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">{formatDate(job.created_at)}</td>
                       <td className="px-4 py-3">
                         <div className="flex justify-end gap-1">
+                          {job.compare_url && (
+                            <Button variant="ghost" size="sm" asChild>
+                              <Link href={`/compare/${job.id}`} aria-label={`Bandingkan ${job.original_filename}`}>
+                                <ScanEye className="h-4 w-4" />
+                              </Link>
+                            </Button>
+                          )}
                           {job.status === "completed" && job.download_url && (
                             <Button variant="ghost" size="sm" onClick={() => void handleDownload(job)} disabled={downloadingId === job.id}>
                               {downloadingId === job.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
@@ -263,6 +272,13 @@ export default function HistoryPage() {
                       <Button size="sm" onClick={() => void handleDownload(job)} disabled={downloadingId === job.id}>
                         {downloadingId === job.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                         Unduh
+                      </Button>
+                    )}
+                    {job.compare_url && (
+                      <Button size="sm" variant="outline" asChild>
+                        <Link href={`/compare/${job.id}`}>
+                          <ScanEye className="h-4 w-4" /> Bandingkan
+                        </Link>
                       </Button>
                     )}
                     <Button size="sm" variant="outline" asChild>

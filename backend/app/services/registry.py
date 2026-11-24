@@ -748,8 +748,9 @@ TOOLS: tuple[ToolSpec, ...] = (
         label="Word ke PDF",
         description=(
             "Ubah DOCX menjadi PDF dengan mempertahankan ukuran halaman, margin, tabel, "
-            "gambar, dan pemisah halaman. LibreOffice dipakai bila tersedia, dengan "
-            "renderer Python deterministik sebagai fallback."
+            "gambar, dan pemisah halaman. Microsoft Word dipakai lebih dulu bila "
+            "tersedia, lalu LibreOffice, lalu renderer Python — urutan yang sama untuk "
+            "konversi tunggal maupun batch."
         ),
         category="word",
         inputs=(".docx",),
@@ -765,22 +766,24 @@ TOOLS: tuple[ToolSpec, ...] = (
                 type="select",
                 default="auto",
                 choices=(
-                    {"value": "auto", "label": "Otomatis (LibreOffice, lalu renderer Python)"},
+                    {"value": "auto", "label": "Otomatis (Word, lalu LibreOffice, lalu Python)"},
                     {"value": "libreoffice", "label": "LibreOffice"},
                     {"value": "python", "label": "Renderer Python (deterministik)"},
                     {"value": "word", "label": "Microsoft Word (khusus Windows)"},
                 ),
                 help=(
-                    "Otomatis tidak menjalankan otomasi Microsoft Word, sehingga hasilnya "
-                    "sama di server Windows maupun Linux. Pilih Word hanya bila server "
-                    "memiliki Word dan Anda memerlukan hasil yang paling mirip aslinya."
+                    "Otomatis memakai Microsoft Word bila server memilikinya (hasil paling "
+                    "mirip Word), lalu LibreOffice, lalu renderer Python. Konversi tunggal "
+                    "dan batch memakai urutan yang sama. Pilih mesin tertentu hanya bila "
+                    "Anda ingin mengunci hasilnya."
                 ),
             ),
         ),
         processing_note=(
-            "Default tidak memakai otomasi Word: LibreOffice digunakan bila terpasang, "
-            "selain itu renderer Python yang deterministik. Header/footer, kolom, dan "
-            "objek mengambang kompleks dapat berbeda dari tampilan di Word."
+            "Urutan mesin sama untuk satu berkas maupun batch: Word bila tersedia, lalu "
+            "LibreOffice, lalu renderer Python. Mesin non-Word dapat menggeser "
+            "header/footer, kolom, dan objek mengambang kompleks; peringatan font "
+            "ditampilkan untuk setiap mesin yang mengganti font."
         ),
     ),
     ToolSpec(

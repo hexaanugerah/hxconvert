@@ -72,6 +72,29 @@ def list_jobs(
     return items, total
 
 
+def identity_usage_since(
+    db: Session,
+    *,
+    user_id: str | None,
+    guest_id: str | None,
+    since,
+    exclude_job_id: str | None = None,
+) -> tuple[int, int]:
+    """Number of jobs and total uploaded bytes for an identity since ``since``.
+
+    ``exclude_job_id`` skips a job that is already in the session (the one being
+    checked after its upload was written) so it does not count itself.
+    """
+    conditions = [identity_filter(user_id, guest_id), ConversionJob.created_at >= since]
+    if exclude_job_id:
+        conditions.append(ConversionJob.id != exclude_job_id)
+    jobs = db.scalar(select(func.count(ConversionJob.id)).where(*conditions)) or 0
+    size = db.scalar(
+        select(func.coalesce(func.sum(ConversionJob.file_size), 0)).where(*conditions)
+    ) or 0
+    return int(jobs), int(size)
+
+
 def job_stats(db: Session, *, user_id: str | None, guest_id: str | None) -> dict:
     condition = identity_filter(user_id, guest_id)
     total = db.scalar(select(func.count(ConversionJob.id)).where(condition)) or 0

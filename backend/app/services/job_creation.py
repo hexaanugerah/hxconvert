@@ -9,7 +9,7 @@ from fastapi import Request, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.errors import UnsupportedFormatError, ValidationAppError
+from app.core.errors import RateLimitError, UnsupportedFormatError, ValidationAppError
 from app.core.security import AuthError, get_or_create_guest_id
 from app.core.timing import log_stage
 from app.core.storage import (
@@ -23,7 +23,56 @@ from app.core.storage import (
 )
 from app.models.conversion import ConversionJob
 from app.models.user import User, utcnow
+from app.repositories.conversions import identity_usage_since
 from app.services.registry import ToolSpec, get_tool, require_available
+
+QUOTA_WINDOW = timedelta(hours=24)
+
+
+def _quota_limits(registered: bool) -> tuple[int, int]:
+    """(job quota, byte quota) for this identity; 0 means unlimited."""
+    jobs = settings.daily_job_quota if registered else settings.guest_daily_job_quota
+    return max(0, jobs), max(0, settings.daily_megabyte_quota) * 1024 * 1024
+
+
+def enforce_daily_quota(
+    db: Session,
+    *,
+    user_id: str | None,
+    guest_id: str | None,
+    registered: bool,
+    incoming_bytes: int = 0,
+    exclude_job_id: str | None = None,
+) -> None:
+    """Reject a job that would exceed the identity's rolling 24-hour quota.
+
+    Counted from the database rather than memory so the limit holds across
+    worker restarts and multiple processes sharing the same database.
+    """
+    job_limit, byte_limit = _quota_limits(registered)
+    if not job_limit and not byte_limit:
+        return
+    used_jobs, used_bytes = identity_usage_since(
+        db,
+        user_id=user_id,
+        guest_id=guest_id,
+        since=utcnow() - QUOTA_WINDOW,
+        exclude_job_id=exclude_job_id,
+    )
+    if job_limit and used_jobs >= job_limit:
+        raise RateLimitError(
+            f"Kuota harian tercapai: maksimal {job_limit} konversi per 24 jam. "
+            + (
+                "Coba lagi nanti."
+                if registered
+                else "Masuk ke akun untuk mendapat kuota lebih besar."
+            )
+        )
+    if byte_limit and used_bytes + incoming_bytes > byte_limit:
+        raise RateLimitError(
+            f"Kuota ukuran harian tercapai: maksimal {byte_limit // (1024 * 1024)} MB "
+            f"per 24 jam (sudah terpakai {used_bytes / (1024 * 1024):.1f} MB)."
+        )
 
 
 def validate_options(tool: ToolSpec, raw: dict) -> dict:
@@ -87,6 +136,15 @@ async def create_job(
     if user is None and guest_id is None:
         raise AuthError("Masuk untuk memulai konversi.")
 
+    # Check the job count before any file is written, and the size quota again
+    # below once the real uploaded size is known.
+    enforce_daily_quota(
+        db,
+        user_id=user.id if user else None,
+        guest_id=guest_id,
+        registered=user is not None,
+    )
+
     job = ConversionJob(
         user_id=user.id if user else None,
         guest_id=guest_id,
@@ -140,7 +198,15 @@ async def create_job(
             )
         if not entries:
             raise ValidationAppError("Tidak ada berkas yang diunggah.")
-        
+        enforce_daily_quota(
+            db,
+            user_id=user.id if user else None,
+            guest_id=guest_id,
+            registered=user is not None,
+            incoming_bytes=total_size,
+            exclude_job_id=job.id,
+        )
+
         # Keep the order the user selected; the worker reads it back.
         write_input_manifest(job.id, entries)
         job.original_filename = ", ".join(entry["original"] for entry in entries)[:255]

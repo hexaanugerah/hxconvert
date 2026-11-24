@@ -47,7 +47,7 @@ from PIL import Image, ImageOps
 from app.core.errors import ConversionError
 from app.services.base import ConversionContext, ConversionResult
 from app.services.capabilities import ocr_available
-from app.services.docx_fonts import FontMeasurer, embed_pdf_fonts
+from app.services.docx_fonts import FontMeasurer, PdfFontFamilies, embed_pdf_fonts
 from app.services.docx_speedups import install_table_cell_cache
 from app.services.ocr import ocr_pdf_page
 from app.services.pdf_ops import _open_pdf, MAX_PAGES
@@ -1284,21 +1284,7 @@ def _convert_layout_mode(
         "gambar dipertahankan. Teks tetap dapat diedit, tetapi disusun dalam kotak teks "
         "mengambang sehingga alur paragraf dapat berbeda dari mode edit.",
     ]
-    if embedded_fonts:
-        warnings.append(
-            "Font asli dari PDF disematkan ke dalam DOCX ("
-            + ", ".join(embedded_fonts[:6])
-            + ("…" if len(embedded_fonts) > 6 else "")
-            + "), sehingga Word dan LibreOffice memakai ukuran huruf yang sama dan "
-            "teks tidak bergeser karena font pengganti. Font yang disematkan adalah "
-            "potongan dari PDF, jadi karakter baru yang Anda ketik sendiri dapat "
-            "memakai font pengganti."
-        )
-    else:
-        warnings.append(
-            "Font asli PDF tidak dapat disematkan; Word memakai font terdekat yang "
-            "tersedia, sehingga posisi teks dapat sedikit bergeser."
-        )
+    _append_embedded_font_warning(warnings, embedded_fonts)
     if numbers_fitted:
         warnings.append(
             "Beberapa angka panjang disesuaikan agar tetap muat dalam satu baris di "
@@ -1340,6 +1326,27 @@ def convert_ocr(ctx: ConversionContext) -> ConversionResult:
         doc.close()
 
 
+def _append_embedded_font_warning(
+    warnings: list[str], embedded_fonts: list[str]
+) -> None:
+    """Explain whether the PDF's own fonts travelled with the DOCX."""
+    if embedded_fonts:
+        warnings.append(
+            "Font asli dari PDF disematkan ke dalam DOCX ("
+            + ", ".join(embedded_fonts[:6])
+            + ("…" if len(embedded_fonts) > 6 else "")
+            + "), sehingga Word dan LibreOffice memakai ukuran huruf yang sama dan "
+            "teks tidak bergeser karena font pengganti. Font yang disematkan adalah "
+            "potongan dari PDF, jadi karakter baru yang Anda ketik sendiri dapat "
+            "memakai font pengganti."
+        )
+    else:
+        warnings.append(
+            "Font asli PDF tidak dapat disematkan; Word memakai font terdekat yang "
+            "tersedia, sehingga posisi teks dapat sedikit bergeser."
+        )
+
+
 def _convert_editable(
     ctx: ConversionContext,
     doc: fitz.Document,
@@ -1367,11 +1374,24 @@ def _convert_editable(
     page_breaks = bool(ctx.options.get("page_breaks", False))
     body_size = _body_font_size(page_analysis)
     headers = _header_footer_texts(page_analysis)
+    # Name each run after the face recorded in the PDF (when that face can be
+    # embedded), so the editable file keeps the original typography instead of
+    # falling back to the Word template's Calibri. Table cells carry plain
+    # strings, so the dominant face is also set on the document styles: every
+    # run without an explicit font then inherits the PDF's own family.
+    font_families = PdfFontFamilies(ctx.input)
+    body_family = _body_font_family(page_analysis, font_families)
     used_ocr_pages: list[int] = []
     two_column_pages: list[int] = []
     copied_images = 0
 
     document = Document()
+    if body_family:
+        for style_name in ("Normal", "Heading 1", "Heading 2", "Heading 3"):
+            try:
+                document.styles[style_name].font.name = body_family
+            except KeyError:  # pragma: no cover - template without the style
+                continue
     section = document.sections[0]
     first = page_analysis[0]
     _apply_page_geometry(
@@ -1533,7 +1553,9 @@ def _convert_editable(
                     for rect in table_rects
                 ):
                     continue
-                _add_text_block(document, block, body_size, headers, warnings)
+                _add_text_block(
+                    document, block, body_size, headers, warnings, font_families
+                )
     finally:
         tables_source.close()
 
@@ -1554,6 +1576,26 @@ def _convert_editable(
     output = ctx.workdir / "converted.docx"
     document.save(output)
 
+    # Keep the PDF's own fonts inside the DOCX, exactly as the layout mode does:
+    # the runs above are named after those faces, and without embedding them a
+    # machine that lacks the font substitutes a wider one and the text reflows.
+    embedded_fonts = embed_pdf_fonts(output, ctx.input)
+    if embedded_fonts:
+        warnings.append(
+            "Jenis huruf asli PDF dipakai untuk setiap paragraf dan disematkan ke "
+            "dalam DOCX ("
+            + ", ".join(embedded_fonts[:6])
+            + ("…" if len(embedded_fonts) > 6 else "")
+            + "), jadi tampilan huruf tetap sama di komputer lain."
+        )
+    elif body_family:
+        # Only warn when the PDF actually has a usable face that failed to
+        # travel: a scanned page has no source font to preserve.
+        warnings.append(
+            "Font asli PDF tidak dapat disematkan, sehingga teks memakai jenis huruf "
+            "bawaan Word; tampilan dapat sedikit berbeda dari PDF."
+        )
+
     return ConversionResult(
         output,
         f"{Path(ctx.original_name).stem or 'document'}.docx",
@@ -1562,12 +1604,15 @@ def _convert_editable(
     )
 
 
-def _line_runs(line: dict) -> list[tuple[str, bool, bool, float, bool]]:
-    runs: list[tuple[str, bool, bool, float, bool]] = []
+def _line_runs(
+    line: dict, families: PdfFontFamilies | None = None
+) -> list[tuple[str, bool, bool, float, bool, str | None]]:
+    runs: list[tuple[str, bool, bool, float, bool, str | None]] = []
     for span in line.get("spans", []):
         text = span.get("text", "")
         if not text:
             continue
+        family = families.family(str(span.get("font", ""))) if families else None
         runs.append(
             (
                 text,
@@ -1575,6 +1620,7 @@ def _line_runs(line: dict) -> list[tuple[str, bool, bool, float, bool]]:
                 _is_italic(span),
                 float(span.get("size", 11)),
                 _is_superscript(span),
+                family,
             )
         )
     return runs
@@ -1593,6 +1639,26 @@ def _join_line_texts(lines: list[str]) -> str:
         else:
             result = f"{result} {line}"
     return _clean(result)
+
+
+def _body_font_family(
+    page_analysis: list[PageInfo], families: PdfFontFamilies
+) -> str | None:
+    """Most used embeddable font family in the document, by character count."""
+    counts: Counter[str] = Counter()
+    for info in page_analysis:
+        for block in info.blocks:
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span.get("text", "").strip()
+                    if len(text) < 12:
+                        continue
+                    family = families.family(str(span.get("font", "")))
+                    if family:
+                        counts[family] += len(text)
+    return counts.most_common(1)[0][0] if counts else None
 
 
 def _body_font_size(page_analysis: list[PageInfo]) -> float:
@@ -1854,14 +1920,16 @@ def _detect_table_borders(page, bbox) -> tuple[str, ...]:
     return tuple(side for side in TABLE_BORDER_SIDES if side in found)
 
 
-def _block_text(block: dict) -> tuple[str, list[tuple[str, bool, bool, float, bool]]]:
+def _block_text(
+    block: dict, families: PdfFontFamilies | None = None
+) -> tuple[str, list[tuple[str, bool, bool, float, bool, str | None]]]:
     lines = []
-    runs: list[tuple[str, bool, bool, float, bool]] = []
+    runs: list[tuple[str, bool, bool, float, bool, str | None]] = []
     for line in block.get("lines", []):
         text = _line_text(line)
         if text:
             lines.append(text)
-            runs.extend(_line_runs(line))
+            runs.extend(_line_runs(line, families))
     return _join_line_texts(lines), runs
 
 
@@ -1892,11 +1960,11 @@ def _classify_text_block_for_heading(
 
 def _add_runs(
     paragraph,
-    runs: list[tuple[str, bool, bool, float, bool]],
+    runs: list[tuple[str, bool, bool, float, bool, str | None]],
     *,
     bold_all: bool = False,
 ) -> None:
-    for text, bold, italic, size, superscript in runs:
+    for text, bold, italic, size, superscript, family in runs:
         if not text:
             continue
         run = paragraph.add_run(text)
@@ -1906,6 +1974,8 @@ def _add_runs(
             run.font.superscript = True
         if size and 6 <= size <= 48:
             run.font.size = Pt(round(size * 2) / 2)
+        if family:
+            run.font.name = family
 
 
 # Word's built-in table grid adds a wide default padding. These values keep
@@ -2312,8 +2382,9 @@ def _add_text_block(
     body_size: float,
     headers: set[str],
     warnings: list[str],
+    families: PdfFontFamilies | None = None,
 ) -> None:
-    text, runs = _block_text(block)
+    text, runs = _block_text(block, families)
     if not text or text in headers:
         return
     max_size = max((run[3] for run in runs), default=body_size)
@@ -2328,7 +2399,7 @@ def _add_text_block(
         style = "List Number" if NUMBER_RE.match(text) else "List Bullet"
         paragraph = document.add_paragraph(style=style)
         # Add content as plain text - runs include list marker which we don't want
-        _add_runs(paragraph, [(content, False, False, body_size, False)])
+        _add_runs(paragraph, [(content, False, False, body_size, False, None)])
         return
 
     if kind == "h" and level:

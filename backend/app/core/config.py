@@ -47,13 +47,47 @@ class Settings(BaseSettings):
     preview_dpi: int = 96
     preview_max_width: int = 1400
     preview_max_pages: int = 60
+    # Visual original-vs-result comparison. Pages are rendered at compare_dpi and
+    # only the first compare_max_pages are compared, to bound CPU and disk use.
+    compare_dpi: int = 100
+    compare_max_pages: int = 25
     allow_anonymous: bool = True
     rate_limit_per_minute: int = 60
+
+    # Per-identity quota for the rolling last 24 hours. ``0`` disables a limit.
+    # Registered users usually get more headroom than anonymous visitors.
+    daily_job_quota: int = 100
+    guest_daily_job_quota: int = 20
+    daily_megabyte_quota: int = 2048
+
+    # Optional shared secret for GET /api/v1/metrics. Empty keeps metrics
+    # readable without a token (they contain aggregate counts, no file/user data).
+    metrics_token: str | None = None
 
     # Performance tuning. CPU-bound conversions run in a process pool (real
     # parallelism across cores); subprocess tools (LibreOffice/Word) keep the
     # thread pool. ``0`` means auto: half the cores, capped at six.
     conversion_workers: int = 0
+    # Persisted results and the batch ZIP normally each read the converted bytes,
+    # so a 20-file all-image batch writes several hundred MB once for the downloads
+    # and once for the archive. When the workdir and the output volume are the same,
+    # ``result_persist_mode`` controls how that re-read is avoided:
+    #   ``"hardlink"`` (default) — the download and the ZIP member point at the
+    #     same bytes; cleanup of the temporary workdir still leaves the results
+    #     intact. Falls back to a copy automatically when a hard link cannot be
+    #     created (different volumes, permissions, or the source was already moved).
+    #   ``"copy"`` — the old behaviour, one copy per result, no hard links.
+    result_persist_mode: str = "hardlink"
+
+    # Content-hash cache for single-file conversions. A batch conversion first
+    # checks this cache so repeated conversions of identical inputs (e.g. common
+    # templates re-uploaded many times) are served from the cache instead of
+    # re-running the converter. Cached results are copied into the cache with
+    # shutil.copy2; the persist hard-link optimisation above does not apply to
+    # cache entries (the cache owns its own copy), and cache hits are excluded
+    # from quota/major-metric counting already by the job-creation path.
+    result_cache_hours: int = 6
+    result_cache_max_file_mb: int = 50
     max_concurrent_uploads: int = 3
     zip_compression_level: int = 6
     result_cache_hours: int = 6

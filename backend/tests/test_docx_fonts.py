@@ -59,6 +59,42 @@ def test_obfuscation_is_reversible_and_only_touches_the_header():
     assert docx_fonts._obfuscate(obfuscated, guid) == payload
 
 
+def test_editable_pdf_to_word_names_and_embeds_pdf_fonts(tmp_path):
+    """The editable mode must keep the PDF's typography, not Word's default."""
+    from app.services import pdf_to_docx
+    from app.services.base import ConversionContext
+
+    vera = _vera_font()
+    if vera is None:
+        pytest.skip("No TrueType test font available.")
+
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(_pdf_with_font(vera))
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    result = pdf_to_docx.convert(
+        ConversionContext(
+            inputs=[pdf],
+            original_names=[pdf.name],
+            options={"mode": "editable"},
+            workdir=workdir,
+        )
+    )
+
+    document = Document(str(result.path))
+    assert document.styles["Normal"].font.name == "Bitstream Vera Sans"
+    families = {
+        run.font.name
+        for paragraph in document.paragraphs
+        for run in paragraph.runs
+        if run.text.strip()
+    }
+    assert "Bitstream Vera Sans" in families
+    with zipfile.ZipFile(result.path) as archive:
+        assert any(name.startswith("word/fonts/") for name in archive.namelist())
+    assert any("disematkan" in warning for warning in result.warnings)
+
+
 def test_embed_pdf_fonts_packages_the_original_face(tmp_path):
     vera = _vera_font()
     if vera is None:

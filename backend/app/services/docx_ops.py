@@ -235,49 +235,70 @@ def _convert_with_python(
     return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
 
 
+ENGINE_CANDIDATES = {
+    # Quality order: Word is the reference renderer, LibreOffice is the closest
+    # portable one, and the Python renderer always works. Every path (single
+    # and batch) walks this same order so a file does not change appearance
+    # just because it was uploaded together with other files.
+    "auto": ("word", "libreoffice", "python"),
+    "word": ("word",),
+    "libreoffice": ("libreoffice",),
+    "python": ("python",),
+}
+
+ENGINE_LABEL = {"word": "Microsoft Word", "libreoffice": "LibreOffice"}
+
+
+def _engine_candidates(ctx: ConversionContext) -> tuple[str, ...]:
+    return ENGINE_CANDIDATES[_engine(ctx)]
+
+
+def _missing_engine_error(engine: str) -> ConversionError:
+    return ConversionError(
+        f"Mesin {ENGINE_LABEL[engine]} dipilih, tetapi {ENGINE_LABEL[engine]} "
+        "tidak tersedia di server ini."
+    )
+
+
+def _engine_failure(engine: str, exc: ConversionError) -> ConversionError:
+    return ConversionError(
+        f"{ENGINE_LABEL[engine]} gagal mengonversi dokumen ini. " + (exc.message or "")
+    )
+
+
 def docx_to_pdf(ctx: ConversionContext) -> ConversionResult:
     document = _open_docx(ctx.input)  # validates the file
     stem = Path(ctx.original_name).stem or "document"
     engine = _engine(ctx)
     warnings: list[str] = []
 
-    # "auto" is deterministic on purpose: LibreOffice when it is installed, else
-    # the built-in Python renderer. Word COM is never launched implicitly, so a
-    # Windows development machine and a Linux server produce the same document.
-    if engine == "word":
-        if not word_available():
-            raise ConversionError(
-                "Mesin Microsoft Word dipilih, tetapi Word tidak tersedia di server ini."
-            )
-        try:
-            output = convert_with_word(ctx.input, ctx.workdir)
-        except ConversionError as exc:
-            raise ConversionError(
-                "Microsoft Word gagal mengekspor dokumen ini. " + (exc.message or "")
-            ) from exc
-        warnings.extend(font_warnings(ctx.input))
-        return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
+    for candidate in _engine_candidates(ctx):
+        if candidate == "python":
+            return _convert_with_python(ctx, document, stem, warnings)
 
-    if libreoffice_available():
+        available = word_available() if candidate == "word" else libreoffice_available()
+        if not available:
+            if engine != "auto":
+                raise _missing_engine_error(candidate)
+            continue
+
         try:
-            output = convert_with_soffice(ctx.input, "pdf", ctx.workdir)
-            # LibreOffice can only use installed or embedded fonts; say so when
-            # the document relies on a face this host does not have.
-            warnings.extend(font_warnings(ctx.input, "LibreOffice"))
+            if candidate == "word":
+                output = convert_with_word(ctx.input, ctx.workdir)
+                warnings.extend(font_warnings(ctx.input))
+            else:
+                output = convert_with_soffice(ctx.input, "pdf", ctx.workdir)
+                # LibreOffice can only use installed or embedded fonts; say so
+                # when the document relies on a face this host does not have.
+                warnings.extend(font_warnings(ctx.input, "LibreOffice"))
             return ConversionResult(output, f"{stem}.pdf", PDF_MIME, warnings)
         except ConversionError as exc:
-            if engine == "libreoffice":
-                raise ConversionError(
-                    "LibreOffice gagal mengonversi dokumen ini. " + (exc.message or "")
-                ) from exc
+            if engine != "auto":
+                raise _engine_failure(candidate, exc) from exc
             warnings.append(
-                f"LibreOffice gagal mengonversi dokumen ini ({exc.message}). "
-                "Renderer Python dipakai; tata letak dapat berbeda."
+                f"{ENGINE_LABEL[candidate]} gagal mengonversi dokumen ini "
+                f"({exc.message}). Renderer berikutnya dipakai; hasil dapat berbeda."
             )
-    elif engine == "libreoffice":
-        raise ConversionError(
-            "Mesin LibreOffice dipilih, tetapi LibreOffice tidak tersedia di server ini."
-        )
 
     return _convert_with_python(ctx, document, stem, warnings)
 
@@ -287,24 +308,25 @@ def docx_to_pdf_batch(
 ) -> list[ConversionResult | None]:
     """Batch fast path: one shared renderer session for many DOCX files.
 
-    Only an explicitly requested Word engine uses the COM pool. The default
-    path stays on LibreOffice when it is installed, and otherwise returns
-    ``None`` so every file goes through the deterministic Python renderer.
+    Uses the same engine order as the single-file path, so a document keeps the
+    same appearance whether it is converted alone or in a batch. Files the fast
+    path cannot render return ``None``; the per-file handler then applies the
+    same rules (including a clear error for a forced engine that is missing).
     """
     if len(contexts) < 2:
         return [None] * len(contexts)
 
-    engine = _engine(contexts[0])
-    if engine == "python":
+    candidates = _engine_candidates(contexts[0])
+    if candidates == ("python",):
         return [None] * len(contexts)
 
     for ctx in contexts:
         ctx.workdir.mkdir(parents=True, exist_ok=True)
     jobs = [(ctx.input, ctx.workdir / "document.pdf") for ctx in contexts]
     outputs: list[Path | None] = [None] * len(contexts)
-    from_word: list[bool] = [False] * len(contexts)
+    used: list[str | None] = [None] * len(contexts)
 
-    if engine == "word" and word_available():
+    if "word" in candidates and word_available():
         try:
             outcomes = convert_parallel_with_word(jobs, contexts[0].workdir.parent)
         except ConversionError:
@@ -312,10 +334,10 @@ def docx_to_pdf_batch(
         for index, outcome in enumerate(outcomes):
             if outcome.output is not None:
                 outputs[index] = outcome.output
-                from_word[index] = True
+                used[index] = "word"
 
     pending = [index for index, produced in enumerate(outputs) if produced is None]
-    if pending and libreoffice_available():
+    if "libreoffice" in candidates and pending and libreoffice_available():
         try:
             lo_outcomes = convert_parallel_with_soffice(
                 [jobs[index] for index in pending], "pdf", contexts[0].workdir.parent
@@ -325,6 +347,7 @@ def docx_to_pdf_batch(
         for pointer, outcome in zip(pending, lo_outcomes):
             if outcome.output is not None:
                 outputs[pointer] = outcome.output
+                used[pointer] = "libreoffice"
 
     results: list[ConversionResult | None] = []
     for index, ctx in enumerate(contexts):
@@ -333,7 +356,11 @@ def docx_to_pdf_batch(
             results.append(None)
             continue
         stem = Path(ctx.original_name).stem or "document"
-        warnings = font_warnings(ctx.input) if from_word[index] else []
+        warnings = (
+            font_warnings(ctx.input, "LibreOffice")
+            if used[index] == "libreoffice"
+            else font_warnings(ctx.input)
+        )
         results.append(
             ConversionResult(produced, f"{stem}.pdf", PDF_MIME, warnings)
         )

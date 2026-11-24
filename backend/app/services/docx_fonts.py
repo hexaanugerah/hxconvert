@@ -284,6 +284,40 @@ def _match_faces(name: str, faces: list[_Face]) -> dict[str, _Face] | None:
     return None
 
 
+# PDF font names carry a six-letter subset prefix, e.g. "ABCDEF+SourceSansPro".
+SUBSET_PREFIX_RE = re.compile(r"^[A-Z]{6}\+")
+
+
+class PdfFontFamilies:
+    """Map PDF font names to the family names Word needs, embeddable only.
+
+    The editable PDF -> Word mode writes fresh runs. Naming each run after the
+    source face keeps the typography of the PDF, but only makes sense when that
+    face can also be embedded: otherwise the reader substitutes a wider font
+    and the text no longer matches the layout it was extracted from. This maps
+    a span's font (regular, bold, subset-prefixed, PostScript-suffixed) to the
+    family of a face that :func:`embed_pdf_fonts` can package.
+    """
+
+    def __init__(self, pdf_path: Path) -> None:
+        self._faces = _pdf_faces(pdf_path)
+        self._cache: dict[str, str | None] = {}
+
+    def family(self, name: str) -> str | None:
+        if not name:
+            return None
+        if name in self._cache:
+            return self._cache[name]
+        clean = SUBSET_PREFIX_RE.sub("", name.strip())
+        matched = _match_faces(clean, self._faces) if self._faces else None
+        family = None
+        if matched:
+            face = matched.get("regular") or next(iter(matched.values()))
+            family = face.family or None
+        self._cache[name] = family
+        return family
+
+
 class FontMeasurer:
     """Measure text width in points with the faces embedded in a PDF.
 

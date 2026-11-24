@@ -1,7 +1,7 @@
 from datetime import datetime
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -24,6 +24,12 @@ class ConversionJob(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
     # Fine-grained progress stage, e.g. queued -> converting -> packaging.
     stage: Mapped[str | None] = mapped_column(String(32), nullable=True, default="queued")
+    # Set by POST /conversions/{id}/cancel. The worker honours it before it
+    # starts and again before it publishes a result; a conversion already
+    # inside a third-party engine is allowed to finish and its output dropped.
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     file_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     output_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)

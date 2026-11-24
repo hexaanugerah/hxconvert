@@ -1,4 +1,4 @@
-import { CheckCircle2, Clock, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, Clock, Loader2, Ban, XCircle } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import type { JobStatus } from "@/types";
@@ -11,6 +11,7 @@ const STATUS: Record<
   processing: { label: "Mengonversi", variant: "default", icon: Loader2 },
   completed: { label: "Selesai", variant: "success", icon: CheckCircle2 },
   failed: { label: "Gagal", variant: "destructive", icon: XCircle },
+  cancelled: { label: "Dibatalkan", variant: "muted", icon: Ban },
   expired: { label: "Kedaluwarsa", variant: "warning", icon: Clock },
 };
 

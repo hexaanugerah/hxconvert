@@ -19,18 +19,18 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.errors import AppError
 from app.core.storage import (
-    job_input_dir,
+    job_inputs,
     job_output_dir,
     job_temp_dir,
-    read_input_manifest,
     remove_job_files,
+    remove_job_outputs,
     sanitize_filename,
 )
 from app.models.conversion import ConversionJob
 from app.models.user import utcnow
 from app.repositories.conversions import add_log, set_warnings
 from app.services.base import ConversionContext
-from app.core.timing import measure, stage_timer
+from app.core.timing import measure, record_outcome, stage_timer
 from app.services.batch_conversion import process_batch_conversion
 from app.services.document_inspection import build_page_records, preview_failures
 from app.services.registry import get_tool
@@ -42,6 +42,7 @@ ACTIVE_STATUSES = ("queued", "processing")
 
 
 def _fail(db, job: ConversionJob, message: str, log_message: str | None = None) -> None:
+    record_outcome("failed")
     job.status = "failed"
     job.stage = "failed"
     job.error_message = message[:1000]
@@ -52,29 +53,21 @@ def _fail(db, job: ConversionJob, message: str, log_message: str | None = None) 
 
 
 def _ordered_inputs(job_id: str) -> tuple[list, list[str], list[str | None]]:
-    """Return uploaded files in the order the user selected them.
+    """Uploaded files in the order the user selected them (see storage)."""
+    return job_inputs(job_id)
 
-    Stored names are random UUIDs, so ``iterdir`` order is meaningless. The
-    manifest written during upload is authoritative; legacy jobs fall back to
-    a sorted listing. Content digests are returned alongside the files so a
-    batch does not have to re-read every upload before converting it.
-    """
-    input_dir = job_input_dir(job_id)
-    manifest = read_input_manifest(job_id)
-    inputs = []
-    original_names: list[str] = []
-    digests: list[str | None] = []
-    for entry in manifest:
-        path = input_dir / entry["stored"]
-        if path.is_file():
-            inputs.append(path)
-            original_names.append(entry["original"])
-            digests.append(entry.get("sha256"))
-    if inputs:
-        return inputs, original_names, digests
 
-    legacy = sorted(path for path in input_dir.iterdir() if path.is_file())
-    return legacy, [path.name for path in legacy], [None] * len(legacy)
+def _cancelled(db, job: ConversionJob, message: str) -> None:
+    """Mark a job cancelled and drop its result, keeping uploads for retry."""
+    record_outcome("cancelled")
+    job.status = "cancelled"
+    job.stage = "cancelled"
+    job.error_message = None
+    job.completed_at = utcnow()
+    job.expires_at = utcnow() + timedelta(hours=settings.result_ttl_hours)
+    remove_job_outputs(job.id)
+    add_log(db, job.id, "cancelled", message)
+    db.commit()
 
 
 def _run_single_conversion(
@@ -108,6 +101,11 @@ def _run_single_conversion(
         cache_key = None
         reused = None
 
+    db.refresh(job)
+    if job.cancel_requested or job.status == "cancelled":
+        _cancelled(db, job, "Cancelled before the conversion started.")
+        return
+
     if reused:
         cached_path, cached_meta = reused
         filename = sanitize_filename(
@@ -125,6 +123,7 @@ def _run_single_conversion(
         job.stage = "completed"
         job.completed_at = utcnow()
         job.expires_at = utcnow() + timedelta(hours=settings.result_ttl_hours)
+        record_outcome("completed")
 
         warnings = list(cached_meta.get("warnings") or [])
         try:
@@ -146,7 +145,6 @@ def _run_single_conversion(
         add_log(db, job.id, "completed", f"Reused cached conversion ({job.output_size} bytes).")
         db.commit()
 
-        shutil.rmtree(job_input_dir(job.id), ignore_errors=True)
         shutil.rmtree(workdir, ignore_errors=True)
         return
 
@@ -163,14 +161,23 @@ def _run_single_conversion(
     except FutureTimeout:
         future.cancel()
         _fail(db, job, "Konversi memakan waktu terlalu lama dan dihentikan. Coba berkas yang lebih kecil.")
-        remove_job_files(job.id)
+        remove_job_outputs(job.id)
         return
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
+    db.refresh(job)
+    if job.cancel_requested:
+        try:
+            result.path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _cancelled(db, job, "Cancelled while the conversion was running.")
+        return
+
     if not result.path.exists() or result.path.stat().st_size == 0:
         _fail(db, job, "Konverter menghasilkan berkas kosong.")
-        remove_job_files(job.id)
+        remove_job_outputs(job.id)
         return
 
     filename = sanitize_filename(result.filename)
@@ -188,6 +195,7 @@ def _run_single_conversion(
     job.stage = "completed"
     job.completed_at = utcnow()
     job.expires_at = utcnow() + timedelta(hours=settings.result_ttl_hours)
+    record_outcome("completed")
 
     # Store the successful result for future identical requests.
     if cache_key is not None:
@@ -225,9 +233,13 @@ def _run_single_conversion(
 def run_conversion_job(job_id: str) -> None:
     db = SessionLocal()
     job: ConversionJob | None = None
+    workdir = None
     try:
         job = db.get(ConversionJob, job_id)
         if job is None or job.status not in ACTIVE_STATUSES:
+            return
+        if job.cancel_requested:
+            _cancelled(db, job, "Cancelled before the conversion started.")
             return
 
         job.status = "processing"
@@ -269,14 +281,23 @@ def run_conversion_job(job_id: str) -> None:
             except FutureTimeout:
                 future.cancel()
                 _fail(db, job, "Konversi memakan waktu terlalu lama dan dihentikan. Coba berkas yang lebih kecil.")
-                remove_job_files(job.id)
+                remove_job_outputs(job.id)
                 return
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
 
+            db.refresh(job)
+            if job.cancel_requested:
+                try:
+                    result.path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                _cancelled(db, job, "Cancelled while the conversion was running.")
+                return
+
             if not result.path.exists() or result.path.stat().st_size == 0:
                 _fail(db, job, "Konverter menghasilkan berkas kosong.")
-                remove_job_files(job.id)
+                remove_job_outputs(job.id)
                 return
 
             filename = sanitize_filename(result.filename)
@@ -293,6 +314,7 @@ def run_conversion_job(job_id: str) -> None:
             job.stage = "completed"
             job.completed_at = utcnow()
             job.expires_at = utcnow() + timedelta(hours=settings.result_ttl_hours)
+            record_outcome("completed")
 
             # Multi-input results (merged PDFs, image-to-PDF) are also paginated:
             # build the same page records and previews as single-file jobs so the
@@ -364,9 +386,14 @@ def run_conversion_job(job_id: str) -> None:
                     ),
                 )
                 
+                db.refresh(job)
+                if job.cancel_requested:
+                    _cancelled(db, job, "Cancelled while the batch was running.")
+                    return
+
                 if batch_result.successful == 0:
                     _fail(db, job, "Semua berkas gagal dikonversi.")
-                    remove_job_files(job.id)
+                    remove_job_outputs(job.id)
                     return
                 
                 # Store batch results
@@ -401,7 +428,8 @@ def run_conversion_job(job_id: str) -> None:
                 job.stage = "completed"
                 job.completed_at = utcnow()
                 job.expires_at = utcnow() + timedelta(hours=settings.result_ttl_hours)
-                
+                record_outcome("completed")
+
                 # Collect all warnings (including archive-size notices)
                 all_warnings = list(batch_result.warnings)
                 for r in batch_result.file_results:
@@ -424,8 +452,11 @@ def run_conversion_job(job_id: str) -> None:
                     db, job, tool, context, inputs, options, workdir
                 )
 
-        shutil.rmtree(job_input_dir(job.id), ignore_errors=True)
-        shutil.rmtree(workdir, ignore_errors=True)
+        # Uploads stay until the result expires: a failed/cancelled job can be
+        # retried without a new upload, and the visual comparison page renders
+        # the original against the result. Expiry deletes the whole job folder.
+        if workdir is not None:
+            shutil.rmtree(workdir, ignore_errors=True)
     except AppError as exc:
         if job is not None:
             _fail(db, job, exc.message)
@@ -443,7 +474,7 @@ def run_conversion_job(job_id: str) -> None:
                     )
             except Exception:  # pragma: no cover
                 logger.exception("Could not record failure for job %s", job_id)
-        remove_job_files(job_id)
+        remove_job_outputs(job_id)
     finally:
         db.close()
 

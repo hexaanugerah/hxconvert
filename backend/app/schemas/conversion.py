@@ -4,7 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 
-JobStatus = Literal["queued", "processing", "completed", "failed", "expired"]
+JobStatus = Literal["queued", "processing", "completed", "failed", "cancelled", "expired"]
 
 
 class ConversionJobOut(BaseModel):
@@ -32,6 +32,38 @@ class ConversionJobOut(BaseModel):
     batch_results: list[dict[str, Any]] = []
     zip_filename: str | None = None
     has_zip: bool = False
+    compare_url: str | None = None
+
+
+class ComparisonPageOut(BaseModel):
+    page: int
+    ratio: float
+    mean_difference: float = 0.0
+    text_similarity: float | None = None
+    status: str
+    offset: list[int] = []
+    original_url: str
+    result_url: str
+    difference_url: str
+
+
+class ComparisonOut(BaseModel):
+    available: bool
+    reason: str | None = None
+    dpi: int = 0
+    page_count: int = 0
+    original_page_count: int = 0
+    result_page_count: int = 0
+    original_name: str | None = None
+    result_name: str | None = None
+    average_ratio: float = 0.0
+    identical_pages: int = 0
+    changed_pages: list[int] = []
+    truncated: bool = False
+    max_pages: int = 0
+    only_original: list[int] = []
+    only_result: list[int] = []
+    pages: list[ComparisonPageOut] = []
 
 
 class ConversionListOut(BaseModel):
@@ -46,6 +78,9 @@ class UsageOut(BaseModel):
     max_files_per_job: int
     result_ttl_hours: int
     allow_anonymous: bool
+    daily_job_quota: int = 0
+    guest_daily_job_quota: int = 0
+    daily_megabyte_quota: int = 0
 
 
 class ConversionStatsOut(BaseModel):
@@ -57,6 +92,8 @@ class ConversionStatsOut(BaseModel):
     processed_bytes: int
     recent: list[ConversionJobOut]
     usage: UsageOut
+    used_jobs_24h: int = 0
+    used_megabytes_24h: float = 0.0
 
 
 class ToolOptionOut(BaseModel):

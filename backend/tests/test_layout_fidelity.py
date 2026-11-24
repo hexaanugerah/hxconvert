@@ -263,8 +263,9 @@ def test_word_to_pdf_matches_word_layout(client):
         pytest.skip("Microsoft Word is required for the reference-layout test.")
 
     source = _rich_docx()
-    # This test measures the Word reference renderer specifically; the default
-    # engine is deterministic (LibreOffice/Python) and never starts Word.
+    # This test measures the Word reference renderer specifically. Auto also
+    # prefers Word when it is installed, but pinning the engine keeps this test
+    # meaningful on machines where Word is missing.
     job = _job(
         client,
         upload(

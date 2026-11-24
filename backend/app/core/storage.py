@@ -115,6 +115,36 @@ def remove_job_files(job_id: str) -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
+def remove_job_outputs(job_id: str) -> None:
+    """Delete results and scratch space but keep uploads (needed for a retry)."""
+    for directory in (OUTPUT_DIR / job_id, TEMP_DIR / job_id):
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def job_inputs(job_id: str) -> tuple[list[Path], list[str], list[str | None]]:
+    """Stored input files in upload order, with original names and digests.
+
+    Stored names are random UUIDs, so directory order is meaningless; the
+    manifest written during upload is authoritative, with a sorted listing as
+    a fallback for legacy jobs.
+    """
+    input_dir = INPUT_DIR / job_id
+    inputs: list[Path] = []
+    original_names: list[str] = []
+    digests: list[str | None] = []
+    for entry in read_input_manifest(job_id):
+        path = input_dir / entry["stored"]
+        if path.is_file():
+            inputs.append(path)
+            original_names.append(entry["original"])
+            digests.append(entry.get("sha256"))
+    if inputs:
+        return inputs, original_names, digests
+
+    legacy = sorted(path for path in input_dir.iterdir() if path.is_file()) if input_dir.is_dir() else []
+    return legacy, [path.name for path in legacy], [None] * len(legacy)
+
+
 def _magic_ok(ext: str, head: bytes) -> bool:
     if ext == ".pdf":
         return head.startswith(b"%PDF")

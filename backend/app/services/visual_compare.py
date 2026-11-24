@@ -80,6 +80,8 @@ class ComparisonReport:
     only_second: list[int] = field(default_factory=list)
     first_page_count: int = 0
     second_page_count: int = 0
+    # Pages left unrendered because of the caller's page cap.
+    truncated_count: int = 0
 
     @property
     def changed_pages(self) -> list[int]:
@@ -171,8 +173,13 @@ def compare_pdfs(
     dpi: int = DEFAULT_DPI,
     first_name: str | None = None,
     second_name: str | None = None,
+    max_pages: int | None = None,
 ) -> ComparisonReport:
-    """Render and compare page by page. The report keeps PNG previews."""
+    """Render and compare page by page. The report keeps PNG previews.
+
+    ``max_pages`` caps how many pages are rendered; pages beyond the cap are
+    reported as present only in the longer document.
+    """
     first = fitz.open(str(first_path))
     second = fitz.open(str(second_path))
     report = ComparisonReport(
@@ -184,8 +191,15 @@ def compare_pdfs(
     )
     try:
         compared = min(first.page_count, second.page_count)
-        report.only_first = list(range(compared + 1, first.page_count + 1))
-        report.only_second = list(range(compared + 1, second.page_count + 1))
+        truncated = False
+        if max_pages is not None and compared > max(0, max_pages):
+            compared = max(0, max_pages)
+            truncated = True
+            report.truncated_count = max(first.page_count, second.page_count) - compared
+        # With a page cap the remaining pages were never compared, so they must
+        # not be reported as existing on only one side.
+        report.only_first = [] if truncated else list(range(compared + 1, first.page_count + 1))
+        report.only_second = [] if truncated else list(range(compared + 1, second.page_count + 1))
         for index in range(compared):
             original = _page_image(first, index, dpi)
             result = _page_image(second, index, dpi)

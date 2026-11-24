@@ -11,6 +11,7 @@ import {
   Info,
   Loader2,
   RotateCcw,
+  ScanEye,
   ShieldCheck,
   Sparkles,
   XCircle,
@@ -631,6 +632,13 @@ export function Converter({ toolId }: { toolId: string }) {
                           {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                           {job.has_zip ? "Unduh Semua (ZIP)" : "Unduh hasil"}
                         </Button>
+                        {job.compare_url && (
+                          <Button variant="outline" className="w-full" asChild>
+                            <Link href={`/compare/${job.id}`}>
+                              <ScanEye className="h-4 w-4" /> Bandingkan asli vs hasil
+                            </Link>
+                          </Button>
+                        )}
                         <Button variant="outline" className="w-full" onClick={reset}>
                           <RotateCcw className="h-4 w-4" /> Konversi berkas lain
                         </Button>

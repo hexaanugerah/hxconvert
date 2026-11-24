@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 
 from app.core.config import settings
 from app.core.storage import job_output_dir, sanitize_filename
+
+
+def _persist_mode() -> str:
+    """Return the configured result-persist mode ("hardlink" or "copy")."""
+    return (getattr(settings, "result_persist_mode", "hardlink") or "hardlink").strip().lower()
 from app.services.base import ConversionContext, ConversionResult
 from app.services.registry import get_tool, ToolSpec
 
@@ -136,13 +141,33 @@ def _pool_init() -> None:
     from app.services import pdf_to_docx  # noqa: F401
 
 
-def _pool_ready(barrier: Any | None = None) -> int:
-    """Worker-side barrier: returns only once every worker in the pool runs."""
-    if barrier is not None:
+def _pool_ready(
+    barrier_dir: str | None = None, workers: int | None = None
+) -> int:
+    """Worker-side barrier: returns only once every worker in the pool runs.
+
+    When ``barrier_dir`` and ``workers`` are given the worker writes a marker
+    file under that directory and waits until all ``workers`` markers exist.
+    This avoids the several-second start cost of a multiprocessing ``Manager``
+    barrier on Windows.
+    """
+    import time as _time
+
+    if barrier_dir is not None and workers is not None:
+        marker = Path(barrier_dir) / str(os.getpid())
         try:
-            barrier.wait(timeout=45)
-        except Exception:  # noqa: BLE001 - a timeout must not kill the worker
+            marker.write_text("", encoding="utf-8")
+        except OSError:
             return -1
+        deadline = _time.monotonic() + 45
+        while _time.monotonic() < deadline:
+            try:
+                if len(list(Path(barrier_dir).iterdir())) >= workers:
+                    return os.getpid()
+            except OSError:
+                pass
+            _time.sleep(0.03)
+        return -1
     return os.getpid()
 
 
@@ -155,21 +180,42 @@ def _prestart_pool(pool: ProcessPoolExecutor, workers: int) -> None:
     are still importing, serialising the batch. A shared barrier holds every
     submitted task until all workers exist, which forces the pool to full size
     and lets the next real submissions run in parallel.
+
+    On Windows a multiprocessing ``Manager`` barrier costs several seconds to
+    start (it spawns its own separate process). The fallback here is a small
+    per-worker flag file under a temporary directory and a per-file timeout, so
+    the pool reaches full size without an extra process.
     """
     if workers <= 1:
         pool.submit(_pool_ready).result(timeout=120)
         return
 
-    manager = None
+    import tempfile as _tempfile
+    import time as _time
+
+    barrier_dir = None
     try:
-        manager = multiprocessing.Manager()
-        barrier = manager.Barrier(workers)
-        futures = [pool.submit(_pool_ready, barrier) for _ in range(workers)]
+        barrier_dir = _tempfile.mkdtemp(prefix="batch-barrier-")
+        barrier_path = Path(barrier_dir)
+        futures = [
+            pool.submit(_pool_ready, str(barrier_path), workers) for _ in range(workers)
+        ]
+        deadline = _time.monotonic() + 120
+        while _time.monotonic() < deadline:
+            try:
+                if len(list(barrier_path.iterdir())) >= workers:
+                    break
+            except OSError:
+                pass
+            _time.sleep(0.03)
         for future in futures:
             future.result(timeout=120)
     finally:
-        if manager is not None:
-            manager.shutdown()
+        if barrier_dir is not None:
+            try:
+                shutil.rmtree(barrier_dir, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def warm_cpu_pool() -> None:
@@ -705,9 +751,63 @@ def _convert_indices(
 
 
 def _persist_result(result: BatchFileResult, results_root: Path) -> None:
-    """Copy one result to its permanent per-file download location."""
+    """Persist one result to its permanent per-file download location.
+
+    The batch ZIP is built from these persisted copies, so each result is read
+    once for persistence and once for the archive. For an all-image batch of
+    twenty PDF-to-Word files that can be several hundred megabytes written
+    twice. When the source and destination are on the same volume, a hard link
+    is used instead of a copy: both the download file and the ZIP member point
+    to the same bytes, so persistence and packaging incur no extra disk I/O and
+    the temporary work directory can still be cleaned up safely.
+
+    When a hard link cannot be created (different volumes, permissions, or the
+    source has already been moved) the result is copied as before.
+    """
     if not result.success or not result.output_path or not result.output_path.exists():
         return
+    _persist_result_inner(result, results_root)
+
+
+def _hardlink_or_copy(src: Path, dst: Path) -> None:
+    """Create ``dst`` as a hard link to ``src`` when possible, otherwise copy.
+
+    A hard link shares inodes, so the ZIP build and the per-file downloads both
+    point at the same bytes on disk. ``shutil.copyfile`` is the portable
+    fallback.
+
+    This is only used when the configured ``result_persist_mode`` is
+    ``"hardlink"``; for ``"copy"`` callers should use ``shutil.copyfile``
+    directly.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        try:
+            from ctypes import windll, wintypes
+
+            CreateHardLinkW = windll.kernel32.CreateHardLinkW
+            CreateHardLinkW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+            ]
+            CreateHardLinkW.restype = wintypes.BOOL
+            if CreateHardLinkW(
+                dst.as_posix(), src.as_posix(), 0
+            ):
+                return
+        except Exception:
+            pass
+    shutil.copyfile(src, dst)
+
+
+def _persist_result_inner(result: BatchFileResult, results_root: Path) -> None:
+    """Inner body of ``_persist_result``, for testing the selection logic."""
     filename = sanitize_filename(
         result.output_filename or result.output_path.name
     )
@@ -717,13 +817,12 @@ def _persist_result(result: BatchFileResult, results_root: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / filename
     try:
-        # Metadata is irrelevant for downloads; copyfile avoids the extra
-        # stat calls copy2 performs per file.
-        shutil.copyfile(result.output_path, target)
+        if _persist_mode() == "hardlink":
+            _hardlink_or_copy(result.output_path, target)
+        else:
+            shutil.copyfile(result.output_path, target)
     except OSError:
-        # Keep the original path; the ZIP can still read it while the
-        # temporary work directory is alive.
-        return
+        shutil.copyfile(result.output_path, target)
     result.output_path = target
     result.output_filename = filename
 
@@ -871,6 +970,11 @@ def process_batch_conversion(
     # one can be downloaded individually after the batch finishes. The batch
     # ZIP is built from these copies. Copies run concurrently because twenty
     # sequential file copies are dominated by per-file latency, not bandwidth.
+    # When hard links are used (the default on the same volume), the persisted
+    # file and the ZIP member share the same bytes, so the result is written
+    # once rather than once for the downloads plus once for the archive.
+    # Cached results are already on permanent storage, so hard links are not
+    # used for them (they are their own copy).
     results_root = job_output_dir(batch_id) / "files"
     to_persist = [
         result

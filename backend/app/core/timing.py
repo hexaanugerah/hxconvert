@@ -12,7 +12,9 @@ Stage names follow the conversion pipeline so runs can be compared:
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
@@ -21,8 +23,31 @@ logger = logging.getLogger("docuconvert.timing")
 
 T = TypeVar("T")
 
+# Per-process counters exported by GET /api/v1/metrics. They reset on restart;
+# job counts come from the database and stay durable. CPU-bound tools that run
+# in a worker process update their own copy, so treat these as this process's
+# view (the parent process records queueing, previews, saves and cache hits).
+_metrics_lock = threading.Lock()
+_stage_count: dict[str, int] = defaultdict(int)
+_stage_ms: dict[str, float] = defaultdict(float)
+_outcomes: dict[str, int] = defaultdict(int)
+
+
+def record_outcome(outcome: str) -> None:
+    with _metrics_lock:
+        _outcomes[outcome] += 1
+
+
+def stage_metrics() -> tuple[dict[str, int], dict[str, float], dict[str, int]]:
+    """Snapshot of (stage counts, stage total ms, job outcomes)."""
+    with _metrics_lock:
+        return dict(_stage_count), dict(_stage_ms), dict(_outcomes)
+
 
 def _log(job_id: str | None, tool: str | None, stage: str, elapsed_ms: float, detail: str = "") -> None:
+    with _metrics_lock:
+        _stage_count[stage] += 1
+        _stage_ms[stage] += elapsed_ms
     parts = [f"job={job_id or '-'}", f"tool={tool or '-'}", f"stage={stage}", f"ms={elapsed_ms:.1f}"]
     if detail:
         parts.append(detail)

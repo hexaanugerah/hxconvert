@@ -64,17 +64,33 @@ Nilai aktual dapat dibaca dari `GET /api/v1/formats` (`capabilities.limits`) dan
 - Masa simpan hasil: default 24 jam.
 - Rate limit: default 60 permintaan/menit per IP (in-memory per proses).
 - Timeout konversi: default 180 detik.
+- Kuota harian per identitas (jendela bergulir 24 jam, dihitung dari database):
+  default 100 pekerjaan untuk pengguna masuk dan 20 untuk tamu, ditambah batas
+  total ukuran unggahan 2048 MB per 24 jam (`DAILY_JOB_QUOTA`,
+  `GUEST_DAILY_JOB_QUOTA`, `DAILY_MEGABYTE_QUOTA`). Setel `0` untuk mematikan
+  batas tersebut. Pelanggaran menghasilkan `429 rate_limited` dan pesan berisi
+  sisa kebijakan; tamu diarahkan untuk masuk agar mendapat kuota lebih besar.
+- `GET /api/v1/metrics` dilindungi `METRICS_TOKEN` bila variabel itu diisi.
+- Banding visual: `COMPARE_DPI` (default 100) dan `COMPARE_MAX_PAGES` (default 25)
+membatasi resolusi serta jumlah halaman yang dirender.
 
 ### Status pekerjaan
 
 ```text
 queued ──▶ processing ──▶ completed
-                    └───▶ failed
+   │                └───▶ failed
+   └──(dibatalkan)──▶ cancelled ──(retry)──▶ queued
+failed ──(retry)──▶ queued
 completed ──(kedaluwarsa)──▶ expired
 ```
 
-Frontend melakukan polling `GET /conversions/{id}` sampai status terminal. Tidak
-ada perhitungan persentase karena backend tidak melaporkan progres per tahap.
+Frontend melakukan polling `GET /conversions/{id}` sampai status terminal
+(`completed`, `failed`, `cancelled`, `expired`). Tidak ada perhitungan
+persentase karena backend tidak melaporkan progres per tahap. Unggahan disimpan
+sampai hasil kedaluwarsa: pekerjaan yang gagal atau dibatalkan dapat dijalankan
+ulang lewat `POST /conversions/{id}/retry` tanpa unggah baru, dan halaman banding
+visual merender berkas asli terhadap hasilnya. Saat kedaluwarsa, seluruh folder
+pekerjaan (input, hasil, pratinjau, dan gambar perbandingan) dihapus.
 
 ### Idempotensi dan format unggahan
 
@@ -346,6 +362,8 @@ Kemungkinan error: `413`, `415`, `422` (opsi/JSON atau jumlah berkas), `429`.
 
 Jika mode `layout` diminta untuk PDF yang seluruhnya hasil pindai, backend otomatis memakai mode edit + OCR (bila OCR tersedia) dan mengirim peringatan. Peringatan pada `warnings` selalu menyebut gambar, font, atau halaman yang tidak dapat dipertahankan persis; tidak ada kehilangan yang disembunyikan.
 
+Mode `editable` juga memakai jenis huruf asli PDF: setiap run diberi nama keluarga font dari PDF (bila font itu dapat disematkan) dan font tersebut disematkan ke DOCX, sehingga tipografi tetap sama di komputer yang tidak memiliki font tersebut. Run yang fontnya tidak dapat disematkan memakai font bawaan Word, dan hal itu dilaporkan di `warnings`.
+
 Di antarmuka web, alat `pdf-to-word` sekarang **hanya memakai `auto`** dan tidak menampilkan pemilih mode. Opsi `mode`, `fast_dpi`, `ocr`, `language`, `page_breaks`, dan `tables` tetap diterima API untuk pemanggil lanjutan, tetapi disembunyikan dari UI agar pengguna cukup mengunggah PDF lalu mengonversi. Hasil `auto` bersifat editable untuk PDF berteks, dan menjadi gambar per halaman hanya bila halaman memang tampak seperti gambar (scan/foto/desain).
 
 Trade-off kecepatan, ketajaman, dan ukuran hasil (diukur dengan `backend/benchmark_large_batch.py` pada mesin 8 core, PDF 12 halaman berfoto 1,7 MB; satu pekerjaan dibatasi 50 berkas):
@@ -362,16 +380,16 @@ Batas ZIP batch: arsip tetap dibuat dan pengguna diberi peringatan di `warnings`
 
 #### Word ke PDF
 
-`docx-to-pdf` memilih renderer lewat opsi `engine`, dan **default tidak menjalankan otomasi Microsoft Word** agar hasilnya sama di server Windows maupun Linux:
+`docx-to-pdf` memilih renderer lewat opsi `engine`. **Konversi tunggal dan batch memakai urutan mesin yang sama**, jadi satu dokumen tidak berubah tampilan hanya karena diunggah bersama berkas lain:
 
 | `engine` | Perilaku |
 |---|---|
-| `auto` (default) | **LibreOffice headless** bila terpasang, selain itu renderer Python deterministik. Otomasi Word tidak pernah dijalankan otomatis. |
+| `auto` (default) | **Microsoft Word** bila tersedia (paling mirip Word), lalu **LibreOffice headless**, lalu renderer Python. Setiap perpindahan mesin dicatat di `warnings`. |
 | `libreoffice` | Hanya LibreOffice; gagal dengan pesan jelas bila tidak terpasang. |
 | `python` | Hanya renderer Python: mempertahankan ukuran halaman, margin, paragraf, tabel, gambar, dan pemisah halaman eksplisit; header/footer, kolom, dan objek mengambang kompleks dapat berbeda. |
 | `word` | Hanya Microsoft Word Automation (`WINWORD.EXE` + `pywin32`, Windows). Paling mirip aslinya, termasuk header/footer dan font. Font yang tidak terpasang dilaporkan di `warnings`. |
 
-Terukur pada 20 DOCX 6 bagian bergambar: 9,3–11,2 detik dengan `auto` di mesin tanpa LibreOffice, versus 22,5–28,5 detik melalui Word COM.
+Peringatan font yang sama (Word maupun LibreOffice) kini muncul untuk hasil batch seperti pada konversi tunggal. Trade-off kecepatan: pada 20 DOCX 6 bagian bergambar, `auto` di mesin tanpa Word memakai 9,3–11,2 detik, sedangkan melalui Word COM 22,5–28,5 detik — kualitas lebih tinggi, waktu lebih lama.
 
 ### `GET /api/v1/conversions`
 
@@ -383,7 +401,7 @@ Query:
 |---|---|---|
 | `page` | 1 | Halaman (≥ 1). |
 | `page_size` | 20 | 1–100. |
-| `status` | — | `queued`, `processing`, `completed`, `failed`, `expired`. |
+| `status` | — | `queued`, `processing`, `completed`, `failed`, `cancelled`, `expired`. |
 | `tool` | — | ID alat. |
 | `q` | — | Pencarian nama berkas/alat (case-insensitive). |
 
@@ -408,10 +426,18 @@ Respons:
     "max_upload_mb": 25,
     "max_files_per_job": 50,
     "result_ttl_hours": 24,
-    "allow_anonymous": true
-  }
+    "allow_anonymous": true,
+    "daily_job_quota": 100,
+    "guest_daily_job_quota": 20,
+    "daily_megabyte_quota": 2048
+  },
+  "used_jobs_24h": 3,
+  "used_megabytes_24h": 12.4
 }
 ```
+
+`used_jobs_24h` dan `used_megabytes_24h` menghitung pekerjaan identitas pemanggil
+dalam 24 jam terakhir (dasar yang sama dengan penegakan kuota).
 
 ### `GET /api/v1/conversions/{job_id}`
 
@@ -427,6 +453,30 @@ Mengunduh hasil sebagai lampiran (`Content-Disposition`).
 - `422` — pekerjaan gagal (berisi pesan kegagalan).
 - `403` — hasil belum siap.
 
+### `POST /api/v1/conversions/{job_id}/cancel`
+
+Meminta pembatalan. Pekerjaan `queued` langsung menjadi `cancelled`; pekerjaan
+`processing` tetap berjalan sampai engine selesai, lalu hasilnya dibuang dan
+status menjadi `cancelled` (pembatalan bersifat kooperatif). Berkas sumber tetap
+disimpan agar bisa diulang.
+
+- `200` — status terbaru (`cancelled` atau `processing` dengan
+  `cancel_requested: true`).
+- `404` — tidak ditemukan/bukan milik Anda.
+- `422` — status sudah terminal (`completed`, `failed`, `cancelled`, `expired`).
+
+### `POST /api/v1/conversions/{job_id}/retry`
+
+Menjalankan ulang pekerjaan `failed` atau `cancelled` memakai berkas sumber yang
+tersimpan, tanpa unggah ulang. Status pekerjaan yang sama direset ke `queued`
+(keluaran, peringatan, pesan galat, dan jumlah halaman dibersihkan) dan
+`expires_at` diperbarui.
+
+- `202` — pekerjaan diantrekan kembali.
+- `404` — tidak ditemukan/bukan milik Anda.
+- `422` — status tidak dapat diulang, atau berkas sumber sudah dihapus karena
+  hasilnya kedaluwarsa (unggah ulang diperlukan).
+
 ### `GET /api/v1/conversions/{job_id}/pages/{page_number}/preview`
 
 Mengembalikan PNG pratinjau halaman yang benar-benar dirender saat pemrosesan.
@@ -439,6 +489,84 @@ Mengembalikan PNG pratinjau halaman yang benar-benar dirender saat pemrosesan.
 Akses memakai aturan kepemilikan yang sama dengan unduhan. Pratinjau memakai DPI
 terpisah (`PREVIEW_DPI`, default 96) sehingga lebih ringan; berkas unduhan tetap
 mengikuti opsi kualitas konversi.
+
+### `GET /api/v1/conversions/{job_id}/compare`
+
+Banding visual halaman asli terhadap hasil konversi. Kedua sisi dirender menjadi
+PDF pada DPI yang sama (`COMPARE_DPI`, default 100), dinormalisasi, lalu
+dibandingkan piksel per piksel (selisih kecil akibat anti-aliasing diabaikan,
+perpindahan beberapa piksel dilaporkan sebagai offset). Hanya
+`COMPARE_MAX_PAGES` halaman pertama (default 25) yang dibandingkan.
+
+Perbandingan dihitung saat pertama kali diminta lalu disimpan di folder pekerjaan,
+sehingga permintaan berikutnya tidak merender ulang. Objek pekerjaan memuat
+`compare_url` bila perbandingan memungkinkan (hasil `pdf`, `docx`, `xlsx`, atau
+`pptx`, satu berkas sumber, belum kedaluwarsa).
+
+```json
+{
+  "available": true,
+  "reason": null,
+  "dpi": 100,
+  "page_count": 2,
+  "original_page_count": 2,
+  "result_page_count": 2,
+  "original_name": "laporan.pdf",
+  "result_name": "laporan.docx",
+  "average_ratio": 0.0103,
+  "identical_pages": 0,
+  "changed_pages": [1, 2],
+  "truncated": false,
+  "max_pages": 25,
+  "only_original": [],
+  "only_result": [],
+  "pages": [
+    {
+      "page": 1,
+      "ratio": 0.0095,
+      "mean_difference": 7.1,
+      "text_similarity": 0.9968,
+      "status": "Mirip",
+      "offset": [0, 1],
+      "original_url": "/api/v1/conversions/{id}/compare/pages/1/original",
+      "result_url": "/api/v1/conversions/{id}/compare/pages/1/result",
+      "difference_url": "/api/v1/conversions/{id}/compare/pages/1/difference"
+    }
+  ]
+}
+```
+
+`status` bernilai `Sama` (< 0,1% piksel berubah), `Mirip` (< 1%), atau
+`Berbeda`. Bila pekerjaan tidak dapat dibandingkan (hasil berupa teks/CSV, batch
+ZIP, berkas asli hilang, atau hasil belum selesai/metode render tidak tersedia),
+respons tetap `200` dengan `available: false` dan `reason` berisi alasannya.
+
+- `404` — tidak ditemukan/bukan milik Anda.
+- `410` — hasil kedaluwarsa dan berkas sudah dihapus.
+
+### `GET /api/v1/conversions/{job_id}/compare/pages/{page_number}/{kind}`
+
+Menyajikan satu gambar perbandingan (`kind`: `original`, `result`, atau
+`difference`) sebagai `image/png`. `404` bila halaman atau jenis gambar tersebut
+tidak ada. Perbandingan harus diminta lebih dulu lewat endpoint di atas.
+
+### `GET /api/v1/metrics`
+
+Metrik format teks Prometheus (`text/plain; version=0.0.4`), tidak memakai
+`prometheus_client`. Isinya:
+
+- `hx_database_up` — `1` bila database menjawab permintaan scrape.
+- `hx_conversion_jobs{status}` — jumlah pekerjaan tersimpan per status (dari DB).
+- `hx_conversion_jobs_active` — pekerjaan `queued` + `processing`.
+- `hx_conversion_jobs_total{tool}` — jumlah pekerjaan per alat (dari DB).
+- `hx_job_outcomes_total{outcome}` — hasil pekerjaan yang dicatat proses ini.
+- `hx_stage_duration_seconds_total{stage}` dan `hx_stage_runs_total{stage}` —
+  waktu dan jumlah eksekusi tiap tahap pada proses ini.
+
+Metrik proses (outcome/tahap) bersifat per proses dan reset saat restart;
+pekerjaan yang berjalan di proses worker terpisah mencatat metriknya sendiri.
+Bila `METRICS_TOKEN` diisi, sertakan header `X-Metrics-Token: <token>` (atau
+`Authorization: Bearer <token>`); tanpa token yang benar respons `403`.
 
 ### `DELETE /api/v1/conversions/{job_id}`
 

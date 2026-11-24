@@ -1,4 +1,10 @@
-export type JobStatus = "queued" | "processing" | "completed" | "failed" | "expired";
+export type JobStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "expired";
 
 export type ToolCategory =
   | "pdf"
@@ -104,6 +110,38 @@ export interface ConversionJob {
   }>;
   zip_filename?: string | null;
   has_zip?: boolean;
+  compare_url?: string | null;
+}
+
+export interface ComparisonPage {
+  page: number;
+  ratio: number;
+  mean_difference: number;
+  text_similarity: number | null;
+  status: "Sama" | "Mirip" | "Berbeda" | string;
+  offset: number[];
+  original_url: string;
+  result_url: string;
+  difference_url: string;
+}
+
+export interface VisualComparison {
+  available: boolean;
+  reason: string | null;
+  dpi: number;
+  page_count: number;
+  original_page_count: number;
+  result_page_count: number;
+  original_name: string | null;
+  result_name: string | null;
+  average_ratio: number;
+  identical_pages: number;
+  changed_pages: number[];
+  truncated: boolean;
+  max_pages: number;
+  only_original: number[];
+  only_result: number[];
+  pages: ComparisonPage[];
 }
 
 export interface ConversionList {

@@ -1,5 +1,11 @@
 import { apiFetch } from "@/lib/api";
-import type { ConversionJob, ConversionList, ConversionStats, JobStatus } from "@/types";
+import type {
+  ConversionJob,
+  ConversionList,
+  ConversionStats,
+  JobStatus,
+  VisualComparison,
+} from "@/types";
 
 export interface CreateConversionInput {
   tool: string;
@@ -39,6 +45,10 @@ export function listJobs(params: HistoryParams = {}): Promise<ConversionList> {
 
 export function getStats(): Promise<ConversionStats> {
   return apiFetch<ConversionStats>("/api/v1/conversions/stats");
+}
+
+export function getComparison(jobId: string): Promise<VisualComparison> {
+  return apiFetch<VisualComparison>(`/api/v1/conversions/${jobId}/compare`);
 }
 
 export function deleteJob(jobId: string): Promise<void> {

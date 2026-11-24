@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.api.v1 import auth, conversions, pdf, tools
+from app.api.v1 import auth, conversions, metrics, pdf, tools
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
 from app.core.error_handlers import register_exception_handlers
@@ -99,6 +99,7 @@ app.include_router(conversions.router, prefix=api)
 app.include_router(tools.router, prefix=api)
 app.include_router(pdf.router, prefix=api)
 app.include_router(pdf.ocr_router, prefix=api)
+app.include_router(metrics.router, prefix=api)
 
 
 @app.get("/api/v1/health", response_model=HealthOut, tags=["health"])

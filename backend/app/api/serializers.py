@@ -127,6 +127,23 @@ def _page_out(job: ConversionJob, page: dict) -> dict:
     return payload
 
 
+RENDERABLE_INPUTS = {
+    "pdf", "docx", "xlsx", "pptx", "txt", "md", "markdown", "html", "htm",
+    "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "gif",
+}
+RENDERABLE_OUTPUTS = {"pdf", "docx", "xlsx", "pptx"}
+
+
+def _compare_url(job: ConversionJob, downloadable: bool) -> str | None:
+    if not downloadable or job.zip_path or job.batch_results_json:
+        return None
+    if job.input_format not in RENDERABLE_INPUTS:
+        return None
+    if job.output_format not in RENDERABLE_OUTPUTS:
+        return None
+    return f"/api/v1/conversions/{job.id}/compare"
+
+
 def job_to_out(job: ConversionJob) -> ConversionJobOut:
     downloadable = job.status == "completed" and bool(job.output_path) and not _is_expired(job)
     pages = [_page_out(job, page) for page in _load_pages(job.pages_json)]
@@ -173,4 +190,5 @@ def job_to_out(job: ConversionJob) -> ConversionJobOut:
         batch_results=batch_results,
         zip_filename=job.zip_filename,
         has_zip=bool(job.zip_path),
+        compare_url=_compare_url(job, downloadable),
     )
