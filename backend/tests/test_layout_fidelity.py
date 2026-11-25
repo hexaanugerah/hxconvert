@@ -313,6 +313,57 @@ def test_word_to_pdf_matches_word_layout(client):
     assert not any("tidak dapat mengekspor" in warning for warning in job["warnings"])
 
 
+def test_table_grid_is_rebuilt_from_cell_widths():
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+
+    from app.services.pdf_to_docx import _align_table_grids
+
+    document = Document()
+    table = document.add_table(rows=2, cols=3)
+    table.cell(0, 0).merge(table.cell(0, 1))
+    table.cell(0, 0).width = Pt(300)
+    table.cell(0, 2).width = Pt(100)
+    for column, width in enumerate((Pt(150), Pt(150), Pt(100))):
+        table.cell(1, column).width = width
+
+    assert _align_table_grids(document) is True
+    columns = table._tbl.tblGrid.findall(qn("w:gridCol"))
+    assert [int(column.get(qn("w:w"))) for column in columns] == [3000, 3000, 2000]
+    declared = table._tbl.tblPr.find(qn("w:tblW"))
+    assert declared is not None
+    assert declared.get(qn("w:type")) == "dxa"
+    assert declared.get(qn("w:w")) == "8000"
+    assert _align_table_grids(document) is False
+
+
+def test_table_grid_rejects_rows_with_misaligned_boundaries():
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+
+    from app.services.pdf_to_docx import _align_table_grids
+
+    document = Document()
+    table = document.add_table(rows=2, cols=3)
+    for column, width in enumerate((Pt(150), Pt(150), Pt(100))):
+        table.cell(0, column).width = width
+    for column, width in enumerate((Pt(100), Pt(150), Pt(150))):
+        table.cell(1, column).width = width
+    before = [
+        int(column.get(qn("w:w")))
+        for column in table._tbl.tblGrid.findall(qn("w:gridCol"))
+    ]
+
+    assert _align_table_grids(document) is False
+    after = [
+        int(column.get(qn("w:w")))
+        for column in table._tbl.tblGrid.findall(qn("w:gridCol"))
+    ]
+    assert after == before
+
+
 def test_word_to_pdf_warns_about_missing_font(client):
     from app.services.capabilities import word_available
 

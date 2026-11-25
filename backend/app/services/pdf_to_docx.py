@@ -2636,6 +2636,136 @@ def _xml_local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _table_cell_width(cell) -> tuple[int, int] | None:
+    """Return ``(grid_span, width_twips)`` for a table cell, or ``None``."""
+    properties = next(
+        (child for child in cell if _xml_local_name(child.tag) == "tcPr"), None
+    )
+    if properties is None:
+        return None
+    span = 1
+    width: int | None = None
+    for child in properties:
+        local = _xml_local_name(child.tag)
+        if local == "gridSpan":
+            try:
+                span = max(1, int(child.get(qn("w:val")) or 1))
+            except (TypeError, ValueError):
+                return None
+        elif local == "tcW":
+            if (child.get(qn("w:type")) or "dxa") != "dxa":
+                return None
+            try:
+                width = int(round(float(child.get(qn("w:w")) or 0)))
+            except (TypeError, ValueError):
+                return None
+    if width is None or width <= 0:
+        return None
+    return span, width
+
+
+def _align_table_grids(document) -> bool:
+    """Rebuild ``w:tblGrid`` from the widths the cells already declare.
+
+    pdf2docx gives every table a grid of equal-width columns while each cell
+    keeps the width measured in the PDF. Word lays such a table out from the
+    cell widths, but LibreOffice and WPS follow the grid, so columns collapse
+    and long amounts wrap on the server even though the same DOCX looks
+    correct in Word. The cell widths are consistent (rows share one total and
+    their boundaries line up), so the real grid can be recovered as the union
+    of every row's cumulative boundaries. Tables that do not line up are left
+    untouched.
+    """
+    changed = False
+    for table in document.element.body.iter(qn("w:tbl")):
+        grid = next(
+            (child for child in table if _xml_local_name(child.tag) == "tblGrid"),
+            None,
+        )
+        if grid is None:
+            continue
+        columns = [
+            child for child in grid if _xml_local_name(child.tag) == "gridCol"
+        ]
+        if not columns:
+            continue
+        rows = [child for child in table if _xml_local_name(child.tag) == "tr"]
+        if not rows:
+            continue
+        row_boundaries: list[list[int]] = []
+        row_spans: list[list[int]] = []
+        total: int | None = None
+        usable = True
+        for row in rows:
+            cells = [
+                child for child in row if _xml_local_name(child.tag) == "tc"
+            ]
+            if not cells:
+                usable = False
+                break
+            boundaries = [0]
+            spans: list[int] = []
+            for cell in cells:
+                info = _table_cell_width(cell)
+                if info is None:
+                    usable = False
+                    break
+                span, width = info
+                spans.append(span)
+                boundaries.append(boundaries[-1] + width)
+            if not usable:
+                break
+            if total is None:
+                total = boundaries[-1]
+            elif boundaries[-1] != total:
+                usable = False
+                break
+            row_boundaries.append(boundaries)
+            row_spans.append(spans)
+        if not usable or not total:
+            continue
+        boundaries = sorted(
+            {value for current in row_boundaries for value in current}
+        )
+        widths = [
+            right - left for left, right in zip(boundaries, boundaries[1:])
+        ]
+        if len(widths) != len(columns) or any(width <= 0 for width in widths):
+            continue
+        index = {value: position for position, value in enumerate(boundaries)}
+        if any(
+            index[end] - index[start] != span
+            for current, spans in zip(row_boundaries, row_spans)
+            for start, end, span in zip(current, current[1:], spans)
+        ):
+            continue
+
+        for column, width in zip(columns, widths):
+            if column.get(qn("w:w")) != str(width):
+                column.set(qn("w:w"), str(width))
+                changed = True
+        properties = next(
+            (child for child in table if _xml_local_name(child.tag) == "tblPr"),
+            None,
+        )
+        if properties is None:
+            continue
+        declared = next(
+            (child for child in properties if _xml_local_name(child.tag) == "tblW"),
+            None,
+        )
+        if declared is None:
+            continue
+        if (
+            (declared.get(qn("w:type")) or "") != "dxa"
+            or (declared.get(qn("w:w")) or "") != str(total)
+        ):
+            declared.set(qn("w:type"), "dxa")
+            declared.set(qn("w:w"), str(total))
+            changed = True
+    return changed
+
+
 def _normalise_table_ooxml(document) -> bool:
     """Make the converted table XML valid for Word, WPS and LibreOffice alike.
 
@@ -2726,6 +2856,9 @@ def _normalise_table_ooxml(document) -> bool:
         for duplicate in margins[1:]:
             properties.remove(duplicate)
             changed = True
+
+    if _align_table_grids(document):
+        changed = True
 
     return changed
 
