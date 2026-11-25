@@ -338,7 +338,7 @@ def test_table_grid_is_rebuilt_from_cell_widths():
     assert _align_table_grids(document) is False
 
 
-def test_table_grid_rejects_rows_with_misaligned_boundaries():
+def test_table_grid_falls_back_to_a_row_without_merged_cells():
     from docx import Document
     from docx.oxml.ns import qn
     from docx.shared import Pt
@@ -351,17 +351,58 @@ def test_table_grid_rejects_rows_with_misaligned_boundaries():
         table.cell(0, column).width = width
     for column, width in enumerate((Pt(100), Pt(150), Pt(150))):
         table.cell(1, column).width = width
-    before = [
-        int(column.get(qn("w:w")))
-        for column in table._tbl.tblGrid.findall(qn("w:gridCol"))
-    ]
 
-    assert _align_table_grids(document) is False
-    after = [
+    assert _align_table_grids(document) is True
+    columns = [
         int(column.get(qn("w:w")))
         for column in table._tbl.tblGrid.findall(qn("w:gridCol"))
     ]
-    assert after == before
+    assert columns == [3000, 3000, 2000]
+    assert _align_table_grids(document) is False
+
+
+def _assert_table_grids_match_cells(document) -> None:
+    """Every table must declare a grid its own cell widths agree with."""
+    from docx.oxml.ns import qn
+
+    for table in document.tables:
+        grid = [
+            int(column.get(qn("w:w")))
+            for column in table._tbl.tblGrid.findall(qn("w:gridCol"))
+        ]
+        assert grid and all(width > 0 for width in grid)
+        declared = table._tbl.tblPr.find(qn("w:tblW"))
+        assert declared is not None
+        assert declared.get(qn("w:type")) == "dxa"
+        assert int(declared.get(qn("w:w"))) == sum(grid)
+        for row in table._tbl.tr_lst:
+            position = 0
+            for cell in row.tc_lst:
+                span = cell.grid_span
+                width = int(cell.tcPr.tcW.w)
+                assert width == sum(grid[position : position + span]), (
+                    "cell width must match the grid columns it covers"
+                )
+                position += span
+            assert position == len(grid)
+
+
+@pytest.mark.parametrize("mode", ["editable", "layout"])
+def test_both_modes_write_a_grid_matching_cell_widths(client, pdf_bytes, mode):
+    from docx import Document
+
+    job = _job(
+        client,
+        upload(
+            client,
+            "pdf-to-word",
+            [("table.pdf", pdf_bytes)],
+            options={"mode": mode, "ocr": "never"},
+        ),
+    )
+    document = Document(io.BytesIO(_download(client, job)))
+    assert document.tables
+    _assert_table_grids_match_cells(document)
 
 
 def test_word_to_pdf_warns_about_missing_font(client):

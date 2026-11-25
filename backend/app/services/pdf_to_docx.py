@@ -41,7 +41,7 @@ from docx.enum.table import (
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Emu, Inches, Pt, RGBColor
+from docx.shared import Emu, Inches, Pt, RGBColor, Twips
 from PIL import Image, ImageOps
 
 from app.core.errors import ConversionError
@@ -2664,6 +2664,70 @@ def _table_cell_width(cell) -> tuple[int, int] | None:
     return span, width
 
 
+def _write_table_grid(table, widths: list[int]) -> bool:
+    """Write ``w:tblGrid`` with one ``w:gridCol`` per real column width.
+
+    ``widths`` are in twips and must describe the same columns the cells use.
+    Word lays a table out from its cells and ignores a wrong grid, but
+    LibreOffice and WPS follow the grid, so every table builder here writes it
+    explicitly instead of leaving whatever default the library produced.
+    """
+    element = getattr(table, "_tbl", table)
+    grid = element.tblGrid
+    if grid is None:
+        grid = OxmlElement("w:tblGrid")
+        properties = element.tblPr
+        if properties is not None:
+            properties.addnext(grid)
+        else:
+            element.insert(0, grid)
+    columns = [
+        child for child in grid if _xml_local_name(child.tag) == "gridCol"
+    ]
+    changed = False
+    for index, width in enumerate(widths):
+        if index < len(columns):
+            column = columns[index]
+        else:
+            column = OxmlElement("w:gridCol")
+            grid.append(column)
+            columns.append(column)
+        if column.get(qn("w:w")) != str(width):
+            column.set(qn("w:w"), str(width))
+            changed = True
+    for extra in columns[len(widths) :]:
+        grid.remove(extra)
+        changed = True
+
+    total = sum(widths)
+    properties = element.tblPr
+    declared = properties.find(qn("w:tblW"))
+    if declared is None:
+        declared = OxmlElement("w:tblW")
+        properties.insert_element_before(
+            declared,
+            "w:jc",
+            "w:tblCellSpacing",
+            "w:tblInd",
+            "w:tblBorders",
+            "w:shd",
+            "w:tblLayout",
+            "w:tblCellMar",
+            "w:tblLook",
+            "w:tblCaption",
+            "w:tblDescription",
+            "w:tblPrChange",
+        )
+    if (
+        (declared.get(qn("w:type")) or "") != "dxa"
+        or (declared.get(qn("w:w")) or "") != str(total)
+    ):
+        declared.set(qn("w:type"), "dxa")
+        declared.set(qn("w:w"), str(total))
+        changed = True
+    return changed
+
+
 def _align_table_grids(document) -> bool:
     """Rebuild ``w:tblGrid`` from the widths the cells already declare.
 
@@ -2673,8 +2737,10 @@ def _align_table_grids(document) -> bool:
     and long amounts wrap on the server even though the same DOCX looks
     correct in Word. The cell widths are consistent (rows share one total and
     their boundaries line up), so the real grid can be recovered as the union
-    of every row's cumulative boundaries. Tables that do not line up are left
-    untouched.
+    of every row's cumulative boundaries. When the rows disagree, the widths of
+    a row without merged cells are used instead, so the grid still matches the
+    columns the cells declare. Only tables whose cells expose no usable widths
+    are left untouched.
     """
     changed = False
     for table in document.element.body.iter(qn("w:tbl")):
@@ -2694,74 +2760,70 @@ def _align_table_grids(document) -> bool:
             continue
         row_boundaries: list[list[int]] = []
         row_spans: list[list[int]] = []
+        aligned = True
         total: int | None = None
-        usable = True
         for row in rows:
             cells = [
                 child for child in row if _xml_local_name(child.tag) == "tc"
             ]
             if not cells:
-                usable = False
+                aligned = False
                 break
             boundaries = [0]
             spans: list[int] = []
             for cell in cells:
                 info = _table_cell_width(cell)
                 if info is None:
-                    usable = False
+                    aligned = False
                     break
                 span, width = info
                 spans.append(span)
                 boundaries.append(boundaries[-1] + width)
-            if not usable:
+            if not aligned:
                 break
             if total is None:
                 total = boundaries[-1]
             elif boundaries[-1] != total:
-                usable = False
-                break
+                aligned = False
             row_boundaries.append(boundaries)
             row_spans.append(spans)
-        if not usable or not total:
-            continue
-        boundaries = sorted(
-            {value for current in row_boundaries for value in current}
-        )
-        widths = [
-            right - left for left, right in zip(boundaries, boundaries[1:])
-        ]
-        if len(widths) != len(columns) or any(width <= 0 for width in widths):
-            continue
-        index = {value: position for position, value in enumerate(boundaries)}
-        if any(
-            index[end] - index[start] != span
-            for current, spans in zip(row_boundaries, row_spans)
-            for start, end, span in zip(current, current[1:], spans)
-        ):
+        if not row_boundaries or not total:
             continue
 
-        for column, width in zip(columns, widths):
-            if column.get(qn("w:w")) != str(width):
-                column.set(qn("w:w"), str(width))
-                changed = True
-        properties = next(
-            (child for child in table if _xml_local_name(child.tag) == "tblPr"),
-            None,
-        )
-        if properties is None:
+        widths: list[int] | None = None
+        if aligned:
+            boundaries = sorted(
+                {value for current in row_boundaries for value in current}
+            )
+            candidate = [
+                right - left for left, right in zip(boundaries, boundaries[1:])
+            ]
+            index = {value: position for position, value in enumerate(boundaries)}
+            if (
+                len(candidate) == len(columns)
+                and all(width > 0 for width in candidate)
+                and not any(
+                    index[end] - index[start] != span
+                    for current, spans in zip(row_boundaries, row_spans)
+                    for start, end, span in zip(current, current[1:], spans)
+                )
+            ):
+                widths = candidate
+        if widths is None:
+            # Rows disagree: a row without merged cells still spells out every
+            # column width exactly, so use it rather than keeping a uniform
+            # default grid that LibreOffice would follow.
+            for boundaries, spans in zip(row_boundaries, row_spans):
+                if len(spans) == len(columns) and all(span == 1 for span in spans):
+                    widths = [
+                        right - left
+                        for left, right in zip(boundaries, boundaries[1:])
+                    ]
+                    break
+        if widths is None:
             continue
-        declared = next(
-            (child for child in properties if _xml_local_name(child.tag) == "tblW"),
-            None,
-        )
-        if declared is None:
-            continue
-        if (
-            (declared.get(qn("w:type")) or "") != "dxa"
-            or (declared.get(qn("w:w")) or "") != str(total)
-        ):
-            declared.set(qn("w:type"), "dxa")
-            declared.set(qn("w:w"), str(total))
+
+        if _write_table_grid(table, widths):
             changed = True
     return changed
 
@@ -2968,7 +3030,14 @@ def _add_table(
 ):
     rows = detected.rows
     columns = max(len(row) for row in rows)
-    widths = _table_column_widths(detected, columns, max_width_inches)
+    # Work in whole twips: ``w:tblGrid``, ``w:tblW`` and every cell width are
+    # written from this one list, so LibreOffice/WPS cannot disagree with Word
+    # about where the column boundaries are because of rounding.
+    grid_widths = [
+        max(1, int(round(width * 20)))
+        for width in _table_column_widths(detected, columns, max_width_inches)
+    ]
+    widths = [width / 20 for width in grid_widths]
     table = document.add_table(rows=len(rows), cols=columns)
     table.style = "Table Grid"
     table.autofit = False
@@ -2980,8 +3049,9 @@ def _add_table(
         detected.borders if detected.borders else TABLE_BORDER_SIDES,
         detected.border_color,
     )
-    for column_index, width in enumerate(widths):
-        table.columns[column_index].width = Pt(width)
+    _write_table_grid(table, grid_widths)
+    for column_index, width in enumerate(grid_widths):
+        table.columns[column_index].width = Twips(width)
     for row_index, height in enumerate(detected.row_heights[: len(rows)]):
         table_row = table.rows[row_index]
         table_row.height = Pt(max(10.0, min(float(height), 96.0)))
@@ -3049,7 +3119,7 @@ def _add_table(
             cell = table.cell(row_index, column_index)
             span = merge_span.get((row_index, column_index), 1)
             column_width = sum(widths[column_index : column_index + span])
-            cell.width = Pt(column_width)
+            cell.width = Twips(sum(grid_widths[column_index : column_index + span]))
             cell.vertical_alignment = (
                 WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 if label_values
