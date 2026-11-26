@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import json
 import re
+import math
+from xml.sax.saxutils import escape
 
 import fitz
 
@@ -352,6 +354,186 @@ def _draw_shape(page: fitz.Page, item: dict) -> None:
         page.draw_rect(rect, color=stroke, fill=fill, width=width)
 
 
+def _svg_point(point) -> str:
+    return f"{float(point.x):.3f} {float(point.y):.3f}"
+
+
+def _drawing_path(items: list[tuple]) -> str:
+    commands: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        kind = item[0]
+        if kind == "l" and len(item) >= 3:
+            commands.append(f"M {_svg_point(item[1])} L {_svg_point(item[2])}")
+        elif kind == "re" and len(item) >= 2:
+            rect = fitz.Rect(item[1])
+            commands.append(
+                f"M {rect.x0:.3f} {rect.y0:.3f} L {rect.x1:.3f} {rect.y0:.3f} "
+                f"L {rect.x1:.3f} {rect.y1:.3f} L {rect.x0:.3f} {rect.y1:.3f} Z"
+            )
+        elif kind == "c" and len(item) >= 5:
+            commands.append(
+                f"M {_svg_point(item[1])} C {_svg_point(item[2])} "
+                f"{_svg_point(item[3])} {_svg_point(item[4])}"
+            )
+        elif kind == "qu" and len(item) >= 2:
+            quad = item[1]
+            commands.append(
+                f"M {_svg_point(quad.ul)} L {_svg_point(quad.ur)} "
+                f"L {_svg_point(quad.lr)} L {_svg_point(quad.ll)} Z"
+            )
+    return " ".join(commands)
+
+
+def _svg_color(value) -> str:
+    if not value:
+        return "none"
+    try:
+        return "#" + "".join(
+            f"{max(0, min(255, round(float(channel) * 255))):02x}"
+            for channel in value[:3]
+        )
+    except (TypeError, ValueError):
+        return "none"
+
+
+def extract_page_drawings(page: fitz.Page, limit: int = 2000) -> list[dict]:
+    """Return page vector paths with enough style data for hit testing/editing."""
+    result: list[dict] = []
+    for index, drawing in enumerate(page.get_drawings()[:limit]):
+        path = _drawing_path(drawing.get("items") or [])
+        rect = fitz.Rect(drawing.get("rect") or page.rect)
+        if not path or rect.is_empty:
+            continue
+        item_types = [item[0] for item in drawing.get("items", []) if item]
+        kind = "line" if item_types == ["l"] else "rect" if item_types == ["re"] else "path"
+        dashes = str(drawing.get("dashes") or "")
+        dash_match = re.search(r"\[([^\]]*)\]", dashes)
+        dash_values = []
+        if dash_match:
+            try:
+                dash_values = [float(value) for value in dash_match.group(1).split()]
+            except ValueError:
+                dash_values = []
+        result.append(
+            {
+                "id": str(index),
+                "kind": kind,
+                "path": path,
+                "x": float(rect.x0),
+                "y": float(rect.y0),
+                "w": max(0.5, float(rect.width)),
+                "h": max(0.5, float(rect.height)),
+                "stroke": _svg_color(drawing.get("color")),
+                "fill": _svg_color(drawing.get("fill")),
+                "stroke_width": max(0.1, float(drawing.get("width") or 1)),
+                "stroke_opacity": float(drawing.get("stroke_opacity") or 1),
+                "fill_opacity": float(drawing.get("fill_opacity") or 1),
+                "line_cap": int((drawing.get("lineCap") or (0,))[0]),
+                "line_join": float(drawing.get("lineJoin") or 0),
+                "dashes": dash_values,
+                "seqno": int(drawing.get("seqno") or index),
+            }
+        )
+    return result
+
+
+def _remove_page_graphics(page: fitz.Page) -> None:
+    page.add_redact_annot(page.rect, fill=None)
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=2, text=1)
+
+
+def _edited_drawings_svg(page: fitz.Page, edits: list[dict]) -> bytes:
+    drawings = page.get_drawings()
+    by_id = {str(entry.get("drawing_id")): entry for entry in edits}
+    pieces: list[str] = []
+    for index, drawing in enumerate(drawings):
+        path = _drawing_path(drawing.get("items") or [])
+        if not path:
+            continue
+        edit = by_id.get(str(index), {})
+        if edit.get("deleted") is True:
+            continue
+        rect = fitz.Rect(drawing.get("rect") or page.rect)
+        source_w = max(0.5, rect.width)
+        source_h = max(0.5, rect.height)
+        x = _number(edit.get("x"), rect.x0, -page.rect.width, page.rect.width * 2)
+        y = _number(edit.get("y"), rect.y0, -page.rect.height, page.rect.height * 2)
+        w = _number(edit.get("w"), source_w, 0.5, page.rect.width * 3)
+        h = _number(edit.get("h"), source_h, 0.5, page.rect.height * 3)
+        sx, sy = w / source_w, h / source_h
+        tx = x - rect.x0 * sx
+        ty = y - rect.y0 * sy
+        scale = math.sqrt(abs(sx * sy))
+        original_stroke = _svg_color(drawing.get("color"))
+        original_fill = _svg_color(drawing.get("fill"))
+        stroke_value = edit.get("stroke", original_stroke)
+        fill_value = edit.get("fill", original_fill)
+        stroke_rgb = _color(stroke_value, None) if stroke_value != "none" else None
+        fill_rgb = _color(fill_value, None) if fill_value != "none" else None
+        stroke = _svg_color(stroke_rgb) if stroke_rgb else "none"
+        fill = _svg_color(fill_rgb) if fill_rgb else "none"
+        width = _number(edit.get("stroke_width"), float(drawing.get("width") or 1), 0.1, 100) * scale
+        stroke_opacity = _number(edit.get("stroke_opacity"), float(drawing.get("stroke_opacity") or 1), 0, 1)
+        fill_opacity = _number(edit.get("fill_opacity"), float(drawing.get("fill_opacity") or 1), 0, 1)
+        dashes = drawing.get("dashes") or ""
+        dash_match = re.search(r"\[([^\]]*)\]", str(dashes))
+        dash_array = dash_match.group(1).strip() if dash_match else ""
+        pieces.append(
+            f'<path d="{path}" transform="translate({tx:.4f} {ty:.4f}) scale({sx:.6f} {sy:.6f})" '
+            f'fill="{fill}" fill-opacity="{fill_opacity:.4f}" stroke="{stroke}" '
+            f'stroke-opacity="{stroke_opacity:.4f}" stroke-width="{width:.4f}" '
+            f'stroke-linecap="round" stroke-linejoin="round" '
+            + (f'stroke-dasharray="{escape(dash_array)}" ' if dash_array else "")
+            + "/>"
+        )
+    width = page.rect.width
+    height = page.rect.height
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.3f}pt" '
+        f'height="{height:.3f}pt" viewBox="0 0 {width:.3f} {height:.3f}">'
+        + "".join(pieces)
+        + "</svg>"
+    )
+    return svg.encode("utf-8")
+
+
+def _apply_background_drawing_edits(
+    doc: fitz.Document, edits: list[dict], warnings: list[str]
+) -> None:
+    grouped: dict[int, list[dict]] = {}
+    for entry in edits:
+        page_index = _page_index(entry.get("page", 1), doc.page_count)
+        grouped.setdefault(page_index, []).append(entry)
+    for page_index, entries in grouped.items():
+        page = doc[page_index]
+        drawings = page.get_drawings()
+        valid = []
+        for entry in entries:
+            try:
+                drawing_index = int(entry.get("drawing_id"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= drawing_index < len(drawings):
+                valid.append(entry)
+        if not valid:
+            continue
+        svg_data = _edited_drawings_svg(page, valid)
+        _remove_page_graphics(page)
+        try:
+            svg_document = fitz.open(stream=svg_data, filetype="svg")
+            pdf_data = svg_document.convert_to_pdf()
+            svg_document.close()
+            vector_page = fitz.open(stream=pdf_data, filetype="pdf")
+            page.show_pdf_page(page.rect, vector_page, 0, overlay=True)
+            vector_page.close()
+        except Exception as exc:
+            warnings.append(
+                f"Halaman {page_index + 1}: shape lama tidak dapat dibangun ulang ({exc})."
+            )
+
+
 def _insert_ocr_line(page: fitz.Page, text: str, rect: fitz.Rect) -> bool:
     """Write one invisible text line over the scanned image.
 
@@ -461,19 +643,25 @@ def _apply_text_edits(
         page = doc[page_index]
         planned: list[tuple[dict, fitz.Rect, dict | None, dict | None]] = []
         for entry in entries:
-            x = _number(entry.get("x"), 0.0, 0.0, page.rect.width)
-            y = _number(entry.get("y"), 0.0, 0.0, page.rect.height)
-            width = _number(entry.get("w"), 1.0, 1.0, page.rect.width * 2)
-            height = _number(entry.get("h"), 1.0, 1.0, page.rect.height * 2)
-            rect = fitz.Rect(x, y, x + width, y + height)
-            if rect.width < 2 or rect.height < 2:
+            target_x = _number(entry.get("x"), 0.0, 0.0, page.rect.width)
+            target_y = _number(entry.get("y"), 0.0, 0.0, page.rect.height)
+            target_w = _number(entry.get("w"), 1.0, 1.0, page.rect.width * 2)
+            target_h = _number(entry.get("h"), 1.0, 1.0, page.rect.height * 2)
+            source = entry.get("source_rect")
+            source = source if isinstance(source, dict) else {}
+            x = _number(source.get("x"), target_x, 0.0, page.rect.width)
+            y = _number(source.get("y"), target_y, 0.0, page.rect.height)
+            width = _number(source.get("w"), target_w, 1.0, page.rect.width * 2)
+            height = _number(source.get("h"), target_h, 1.0, page.rect.height * 2)
+            source_rect = fitz.Rect(x, y, x + width, y + height)
+            if source_rect.width < 2 or source_rect.height < 2:
                 warnings.append(
                     f"Halaman {page_index + 1}: satu area teks terlalu kecil untuk diedit."
                 )
                 continue
             # Detect before the redaction removes the original span.
             style = (
-                _detect_text_style(page, rect)
+                _detect_text_style(page, source_rect)
                 if entry.get("auto_style") is True
                 else None
             )
@@ -486,13 +674,22 @@ def _apply_text_edits(
                     str(entry.get("text") or ""),
                     f"EDF{len(planned)}",
                 )
-            page.add_redact_annot(rect, fill=(1.0, 1.0, 1.0))
-            planned.append((entry, rect, style, embedded))
+            page.add_redact_annot(source_rect, fill=(1.0, 1.0, 1.0))
+            planned.append((entry, source_rect, style, embedded))
         if not planned:
             continue
-        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        # Keep vector artwork intact when replacing text that sits inside
+        # tables, boxes, or other drawn shapes.
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=0)
         for entry, rect, style, embedded in planned:
-            size = _number(entry.get("size"), max(6.0, rect.height * 0.8), 4.0, 200.0)
+            target_x = _number(entry.get("x"), rect.x0, 0.0, page.rect.width)
+            target_y = _number(entry.get("y"), rect.y0, 0.0, page.rect.height)
+            target_w = _number(entry.get("w"), rect.width, 1.0, page.rect.width * 2)
+            target_h = _number(entry.get("h"), rect.height, 1.0, page.rect.height * 2)
+            target_rect = fitz.Rect(
+                target_x, target_y, target_x + target_w, target_y + target_h
+            )
+            size = _number(entry.get("size"), max(6.0, target_rect.height * 0.8), 4.0, 200.0)
             font = str(entry.get("font") or "helv")
             bold = bool(entry.get("bold"))
             italic = bool(entry.get("italic"))
@@ -500,11 +697,16 @@ def _apply_text_edits(
             if style:
                 font, bold, italic = _font_from_span(style["font"], style["flags"])
                 color = _color_from_int(style["color"], color)
-            baseline = _number(entry.get("baseline"), rect.y1, rect.y0, rect.y1)
-            baseline = max(rect.y0 + size * 0.35, min(baseline, rect.y1))
+            baseline = _number(
+                entry.get("baseline"), target_rect.y1, -page.rect.height, page.rect.height * 2
+            )
+            baseline = max(
+                target_rect.y0 + size * 0.35,
+                min(baseline, target_rect.y1),
+            )
             item = {
                 "text": str(entry.get("text") or ""),
-                "x": rect.x0,
+                "x": target_rect.x0,
                 "y": baseline - size,
                 "size": size,
                 "color": color,
@@ -611,17 +813,23 @@ def apply_edits(ctx: ConversionContext) -> ConversionResult:
         raise ValidationAppError("Data edit PDF harus berupa objek JSON.")
 
     items = payload.get("items") or []
+    background_drawings = payload.get("background_drawings") or []
     replacements = payload.get("replaces") or payload.get("replace") or []
-    if not isinstance(items, list) or not isinstance(replacements, list):
+    if (
+        not isinstance(items, list)
+        or not isinstance(background_drawings, list)
+        or not isinstance(replacements, list)
+    ):
         raise ValidationAppError("Data edit PDF tidak valid.")
     items = [item for item in items if isinstance(item, dict)]
+    background_drawings = [item for item in background_drawings if isinstance(item, dict)]
     replacements = [entry for entry in replacements if isinstance(entry, dict)]
-    if not items and not replacements:
+    if not items and not background_drawings and not replacements:
         raise ValidationAppError(
             "Tambahkan minimal satu elemen (teks, gambar, bentuk, atau penggantian teks) "
             "sebelum menerapkan edit."
         )
-    if len(items) > MAX_ITEMS:
+    if len(items) + len(background_drawings) > MAX_ITEMS:
         raise ValidationAppError(f"Maksimal {MAX_ITEMS} elemen per dokumen.")
 
     from app.services.pdf_ops import _open_pdf
@@ -640,6 +848,11 @@ def apply_edits(ctx: ConversionContext) -> ConversionResult:
             for item in items
             if str(item.get("type") or "").lower() not in ("text-edit", "replace-rect")
         ]
+        # Drawing IDs refer to the original PDF drawing order. Apply those
+        # changes before text redactions can change the page's object order.
+        if background_drawings:
+            _apply_background_drawing_edits(doc, background_drawings, warnings)
+
         if direct_edits:
             _apply_text_edits(doc, direct_edits, warnings)
 

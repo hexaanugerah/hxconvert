@@ -23,10 +23,78 @@ from app.schemas.conversion import ConversionJobOut
 from app.services.capabilities import ocr_available
 from app.services.job_creation import create_job
 from app.services.ocr import ocr_pdf_page_lines
+from app.services.pdf_editor import _remove_page_graphics, extract_page_drawings
 from app.workers.runner import run_conversion_job
 
 router = APIRouter(prefix="/pdf", tags=["pdf"])
 ocr_router = APIRouter(tags=["ocr"])
+
+
+@router.post("/drawings")
+async def pdf_drawings(
+    files: list[UploadFile] = File(...),
+    _rate=Depends(enforce_rate_limit),
+):
+    """List editable vector paths from a PDF for the browser editor."""
+    if len(files) != 1 or extension_of(files[0].filename) != ".pdf":
+        raise UnsupportedFormatError("Editor shape menerima tepat satu berkas PDF.")
+    data = await files[0].read()
+    if len(data) > settings.max_upload_mb * 1024 * 1024:
+        raise ValidationAppError(
+            f"Berkas melebihi batas {settings.max_upload_mb} MB untuk editor PDF."
+        )
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception as exc:
+        raise ConversionError("PDF tidak dapat dibuka.") from exc
+    try:
+        if doc.needs_pass:
+            raise ValidationAppError("PDF ini dilindungi kata sandi.")
+        page_count = min(doc.page_count, 20)
+        return {
+            "pages": [
+                {
+                    "page": index + 1,
+                    "drawings": extract_page_drawings(doc[index]),
+                    "truncated": len(doc[index].get_drawings()) > 2000,
+                }
+                for index in range(page_count)
+            ],
+            "page_count": doc.page_count,
+        }
+    finally:
+        doc.close()
+
+
+@router.post("/background-without-shapes")
+async def pdf_background_without_shapes(
+    files: list[UploadFile] = File(...),
+    page_number: int = Form(1),
+    _rate=Depends(enforce_rate_limit),
+):
+    """Render a page with vector paths removed but text and images untouched."""
+    if len(files) != 1 or extension_of(files[0].filename) != ".pdf":
+        raise UnsupportedFormatError("Pilih satu berkas PDF untuk merender halaman.")
+    data = await files[0].read()
+    if len(data) > settings.max_upload_mb * 1024 * 1024:
+        raise ValidationAppError(
+            f"Berkas melebihi batas {settings.max_upload_mb} MB untuk editor PDF."
+        )
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception as exc:
+        raise ConversionError("PDF tidak dapat dibuka.") from exc
+    try:
+        if doc.needs_pass:
+            raise ValidationAppError("PDF ini dilindungi kata sandi.")
+        if page_number < 1 or page_number > doc.page_count:
+            raise ValidationAppError("Nomor halaman PDF tidak valid.")
+        page = doc[page_number - 1]
+        _remove_page_graphics(page)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+        return Response(content=pixmap.tobytes("png"), media_type="image/png")
+    finally:
+        doc.close()
 
 
 @router.post("/ocr-layout")

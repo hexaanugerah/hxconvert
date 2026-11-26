@@ -37,7 +37,7 @@ import { API_URL, downloadJobFile, getToken } from "@/lib/api";
 import { cn, formatBytes } from "@/lib/utils";
 import { createConversion, getJob } from "@/services/conversions";
 import { getFormats } from "@/services/formats";
-import { getOcrPageLayout } from "@/services/pdf";
+import { getOcrPageLayout, getPdfDrawings, getPdfPageWithoutShapes, type PdfDrawing } from "@/services/pdf";
 
 const MAX_EDITOR_PAGES = 20;
 const MAX_ASSETS = 4;
@@ -76,6 +76,7 @@ interface EditorPage {
   displayHeight: number;
   url: string;
   texts: PdfTextRun[];
+  drawings: PdfDrawing[];
   textsTruncated?: boolean;
 }
 
@@ -132,6 +133,27 @@ interface LineItem extends BaseItem {
   strokeWidth: number;
 }
 
+interface DrawingItem extends BaseItem {
+  type: "drawing";
+  drawingId: string;
+  kind: PdfDrawing["kind"];
+  path: string;
+  sourceX: number;
+  sourceY: number;
+  sourceW: number;
+  sourceH: number;
+  w: number;
+  h: number;
+  stroke: string;
+  fill: string;
+  hasFill: boolean;
+  strokeWidth: number;
+  strokeOpacity: number;
+  fillOpacity: number;
+  dashes: number[];
+  deleted: boolean;
+}
+
 interface TextEditItem extends BaseItem {
   type: "text-edit";
   w: number;
@@ -148,9 +170,10 @@ interface TextEditItem extends BaseItem {
   // Baseline of the original text in PDF points. The box is padded a little
   // to cover ascenders/descenders, so the replacement text is aligned here.
   baseline?: number;
+  source?: { x: number; y: number; w: number; h: number };
 }
 
-type EditItem = TextItem | ImageItem | ShapeItem | LineItem | TextEditItem;
+type EditItem = TextItem | ImageItem | ShapeItem | LineItem | TextEditItem | DrawingItem;
 
 interface Draft {
   page: number;
@@ -281,10 +304,10 @@ function runIsCovered(run: PdfTextRun, items: EditItem[]): boolean {
     (item) =>
       item.type === "text-edit" &&
       item.page === run.page &&
-      item.x < run.x + run.w &&
-      item.x + item.w > run.x &&
-      item.y < run.y + run.h &&
-      item.y + item.h > run.y,
+      (item.source?.x ?? item.x) < run.x + run.w &&
+      (item.source?.x ?? item.x) + (item.source?.w ?? item.w) > run.x &&
+      (item.source?.y ?? item.y) < run.y + run.h &&
+      (item.source?.y ?? item.y) + (item.source?.h ?? item.h) > run.y,
   );
 }
 
@@ -415,6 +438,10 @@ function restoreItem(raw: unknown): EditItem | null {
     };
   }
   if (type === "text-edit") {
+    const sourceValue = value.source;
+    const source = sourceValue && typeof sourceValue === "object"
+      ? sourceValue as Record<string, unknown>
+      : null;
     return {
       ...base,
       type: "text-edit",
@@ -431,6 +458,14 @@ function restoreItem(raw: unknown): EditItem | null {
         value.baseline,
         finiteNumber(value.y, 0) + finiteNumber(value.h, 20),
       ),
+      source: source
+        ? {
+            x: finiteNumber(source.x, finiteNumber(value.x, 0)),
+            y: finiteNumber(source.y, finiteNumber(value.y, 0)),
+            w: finiteNumber(source.w, finiteNumber(value.w, 120)),
+            h: finiteNumber(source.h, finiteNumber(value.h, 20)),
+          }
+        : undefined,
     };
   }
   if (type === "line") {
@@ -441,6 +476,30 @@ function restoreItem(raw: unknown): EditItem | null {
       y2: finiteNumber(value.y2, base.y),
       stroke: savedColor(value.stroke, "#111111"),
       strokeWidth: finiteNumber(value.strokeWidth, 2),
+    };
+  }
+  if (type === "drawing") {
+    const kind = value.kind === "line" || value.kind === "rect" ? value.kind : "path";
+    return {
+      ...base,
+      type: "drawing",
+      drawingId: String(value.drawingId ?? ""),
+      kind,
+      path: typeof value.path === "string" ? value.path : "",
+      sourceX: finiteNumber(value.sourceX, base.x),
+      sourceY: finiteNumber(value.sourceY, base.y),
+      sourceW: finiteNumber(value.sourceW, finiteNumber(value.w, 1)),
+      sourceH: finiteNumber(value.sourceH, finiteNumber(value.h, 1)),
+      w: finiteNumber(value.w, 1),
+      h: finiteNumber(value.h, 1),
+      stroke: savedColor(value.stroke, "#111111"),
+      fill: savedColor(value.fill, "#ffffff"),
+      hasFill: Boolean(value.hasFill),
+      strokeWidth: finiteNumber(value.strokeWidth, 1),
+      strokeOpacity: finiteNumber(value.strokeOpacity, 1),
+      fillOpacity: finiteNumber(value.fillOpacity, 1),
+      dashes: Array.isArray(value.dashes) ? value.dashes.map((part) => finiteNumber(part, 0)) : [],
+      deleted: Boolean(value.deleted),
     };
   }
   if (type === "rect" || type === "ellipse") {
@@ -490,6 +549,8 @@ export function PdfEditor() {
 
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pages, setPages] = useState<EditorPage[]>([]);
+  const [drawingBackgrounds, setDrawingBackgrounds] = useState<Record<number, string>>({});
+  const drawingBackgroundUrls = useRef<string[]>([]);
   const [pdfPageCount, setPdfPageCount] = useState<number | null>(null);
   const [loadingPdf, setLoadingPdf] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -575,6 +636,9 @@ export function PdfEditor() {
     const createdUrls: string[] = [];
 
     setPages([]);
+    drawingBackgroundUrls.current.forEach((url) => URL.revokeObjectURL(url));
+    drawingBackgroundUrls.current = [];
+    setDrawingBackgrounds({});
     setPdfPageCount(null);
     setLoadingPdf(true);
     setLoadError(null);
@@ -603,6 +667,14 @@ export function PdfEditor() {
         documentProxy = await task.promise;
         if (cancelled) return;
         setPdfPageCount(documentProxy.numPages);
+
+        let drawingsByPage = new Map<number, PdfDrawing[]>();
+        try {
+          const layout = await getPdfDrawings(pdfFile);
+          drawingsByPage = new Map(layout.pages.map((entry) => [entry.page, entry.drawings]));
+        } catch {
+          // Text and newly added objects still work when vector inspection is unavailable.
+        }
 
         const total = Math.min(documentProxy.numPages, MAX_EDITOR_PAGES);
         const rendered: EditorPage[] = [];
@@ -717,6 +789,7 @@ export function PdfEditor() {
             displayHeight: viewport.height,
             url,
             texts,
+            drawings: drawingsByPage.get(number) ?? [],
             textsTruncated,
           });
           if (cancelled) return;
@@ -735,6 +808,8 @@ export function PdfEditor() {
     return () => {
       cancelled = true;
       createdUrls.forEach((url) => URL.revokeObjectURL(url));
+      drawingBackgroundUrls.current.forEach((url) => URL.revokeObjectURL(url));
+      drawingBackgroundUrls.current = [];
       void documentProxy?.destroy?.();
       void loadingTask?.destroy?.();
     };
@@ -752,7 +827,12 @@ export function PdfEditor() {
     const savedAt = Date.parse(savedDraft.savedAt);
     if (Number.isFinite(savedAt) && savedAt > pdfOpenedAtRef.current) return;
     restoredRef.current = true;
-    const restoredItems = savedDraft.items.map((item) => ({ ...item, id: newId() }));
+    const restoredItems = savedDraft.items.map((item) => ({
+      ...item,
+      // Native drawing IDs are tied to their source PDF page and are used to
+      // match the SVG hit target after restoring the draft.
+      id: item.type === "drawing" ? item.id : newId(),
+    }));
     setItems(restoredItems);
     if (restoredItems.length) {
       toast.success("Susunan elemen dipulihkan", {
@@ -837,7 +917,10 @@ export function PdfEditor() {
       if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         recordHistory();
-        setItems((current) => current.filter((item) => item.id !== selectedId));
+        setItems((current) => current.flatMap((item) => {
+          if (item.id !== selectedId) return [item];
+          return item.type === "drawing" ? [{ ...item, deleted: true }] : [];
+        }));
         setSelectedId(null);
       }
     };
@@ -860,7 +943,12 @@ export function PdfEditor() {
       return createConversion({
         tool: "edit-pdf",
         files: [pdfFile, ...assets.map((asset) => asset.file)],
-        options: { edits: JSON.stringify({ items: serializeItems(items) }) },
+        options: {
+          edits: JSON.stringify({
+            items: serializeItems(items).filter((item) => item.type !== "background-drawing"),
+            background_drawings: serializeItems(items).filter((item) => item.type === "background-drawing"),
+          }),
+        },
       });
     },
     onSuccess: (created) => {
@@ -919,6 +1007,80 @@ export function PdfEditor() {
     setEditValue(run.text);
   }
 
+  function makeTextEditItem(run: PdfTextRun, text: string): TextEditItem {
+    const padTop = run.h * 0.08;
+    const padBottom = run.h * 0.35;
+    const source = {
+      x: Math.max(0, run.x - 1),
+      y: Math.max(0, run.y - padTop),
+      w: Math.max(run.w + 2, 8),
+      h: Math.max(run.h + padTop + padBottom, 8),
+    };
+    return {
+      id: newId(),
+      type: "text-edit",
+      page: run.page,
+      ...source,
+      source,
+      text,
+      size: Math.max(4, run.size),
+      color: run.color,
+      font: run.font,
+      bold: run.bold,
+      italic: run.italic,
+      autoStyle: true,
+      baseline: run.baseline ?? run.y + run.h,
+    };
+  }
+
+  function beginRunInteraction(event: React.PointerEvent<HTMLButtonElement>, run: PdfTextRun) {
+    event.stopPropagation();
+    event.preventDefault();
+    if (mode !== "select") return;
+    const page = pages.find((entry) => entry.number === run.page);
+    const surface = event.currentTarget.closest<HTMLElement>("[data-page-surface]");
+    if (!page || !surface) return;
+    const rect = surface.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+    let item: TextEditItem | null = null;
+    const onMove = (moveEvent: PointerEvent) => {
+      const dx = ((moveEvent.clientX - startX) / rect.width) * page.widthPt;
+      const dy = ((moveEvent.clientY - startY) / rect.height) * page.heightPt;
+      if (!moved && Math.hypot(dx, dy) * (rect.width / page.widthPt) < 4) return;
+      if (!moved) {
+        moved = true;
+        item = makeTextEditItem(run, run.text);
+        recordHistory();
+        setEditingRun(null);
+        setEditingItem(null);
+        setSelectedId(item.id);
+        setActivePage(run.page);
+        setItems((current) => [...current, item!]);
+      }
+      const currentItem = item;
+      if (!currentItem) return;
+      setItems((current) => current.map((entry) =>
+        entry.id === currentItem.id && entry.type === "text-edit"
+          ? {
+              ...entry,
+              x: clamp((currentItem.source?.x ?? currentItem.x) + dx, 0, page.widthPt),
+              y: clamp((currentItem.source?.y ?? currentItem.y) + dy, 0, page.heightPt),
+              baseline: (currentItem.baseline ?? currentItem.y + currentItem.h) + dy,
+            }
+          : entry,
+      ));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (!moved) beginRunEdit(run);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   function beginItemEdit(item: TextEditItem) {
     if (mode !== "select") return;
     setSelectedId(item.id);
@@ -928,6 +1090,66 @@ export function PdfEditor() {
     cancelEditRef.current = false;
     setEditingItem(item);
     setEditValue(item.text);
+  }
+
+  function makeDrawingEditItem(page: EditorPage, drawing: PdfDrawing): DrawingItem {
+    return {
+      id: `drawing-${page.number}-${drawing.id}`,
+      type: "drawing",
+      page: page.number,
+      drawingId: drawing.id,
+      kind: drawing.kind,
+      path: drawing.path,
+      x: drawing.x,
+      y: drawing.y,
+      w: drawing.w,
+      h: drawing.h,
+      sourceX: drawing.x,
+      sourceY: drawing.y,
+      sourceW: drawing.w,
+      sourceH: drawing.h,
+      stroke: drawing.stroke === "none" ? "#111111" : drawing.stroke,
+      fill: drawing.fill === "none" ? "#ffffff" : drawing.fill,
+      hasFill: drawing.fill !== "none",
+      strokeWidth: drawing.stroke_width,
+      strokeOpacity: drawing.stroke_opacity,
+      fillOpacity: drawing.fill_opacity,
+      dashes: drawing.dashes,
+      deleted: false,
+    };
+  }
+
+  function beginDrawingInteraction(
+    event: React.PointerEvent<SVGPathElement>,
+    page: EditorPage,
+    drawing: PdfDrawing,
+  ) {
+    if (mode !== "select") return;
+    event.stopPropagation();
+    event.preventDefault();
+    const id = `drawing-${page.number}-${drawing.id}`;
+    const item = (items.find((entry) => entry.id === id && entry.type === "drawing") as DrawingItem | undefined)
+      ?? makeDrawingEditItem(page, drawing);
+    setItems((current) => current.some((entry) => entry.id === id) ? current : [...current, item]);
+    setSelectedId(id);
+    setActivePage(page.number);
+    setEditingRun(null);
+    setEditingItem(null);
+    beginDrag(event, item);
+
+    const file = pdfFileRef.current;
+    if (file && !drawingBackgrounds[page.number]) {
+      void getPdfPageWithoutShapes(file, page.number).then((blob) => {
+        if (pdfFileRef.current !== file || drawingBackgrounds[page.number]) return;
+        const url = URL.createObjectURL(blob);
+        drawingBackgroundUrls.current.push(url);
+        setDrawingBackgrounds((current) =>
+          current[page.number] ? current : { ...current, [page.number]: url },
+        );
+      }).catch((error: Error) => {
+        toast.error("Shape latar tidak bisa dimuat untuk diedit", { description: error.message });
+      });
+    }
   }
 
   function commitItemEdit() {
@@ -1066,28 +1288,7 @@ export function PdfEditor() {
     const value = editValue.trim();
     if (!value || value === run.text.trim()) return;
     recordHistory();
-    // Pad the redaction box mostly at the bottom so descenders of the old text
-    // are removed without clipping the line above; the new text keeps the
-    // original baseline.
-    const padTop = run.h * 0.08;
-    const padBottom = run.h * 0.35;
-    const item: TextEditItem = {
-      id: newId(),
-      type: "text-edit",
-      page: run.page,
-      x: Math.max(0, run.x - 1),
-      y: Math.max(0, run.y - padTop),
-      w: Math.max(run.w + 2, 8),
-      h: Math.max(run.h + padTop + padBottom, 8),
-      text: value,
-      size: Math.max(4, run.size),
-      color: run.color,
-      font: run.font,
-      bold: run.bold,
-      italic: run.italic,
-      autoStyle: true,
-      baseline: run.baseline ?? run.y + run.h,
-    };
+    const item = makeTextEditItem(run, value);
     setItems((current) => [...current, item]);
     setSelectedId(item.id);
   }
@@ -1380,13 +1581,11 @@ export function PdfEditor() {
     window.addEventListener("pointerup", onUp);
   }
 
-  function beginDrag(event: React.PointerEvent<HTMLDivElement>, item: EditItem) {
+  function beginDrag(event: React.PointerEvent<Element>, item: EditItem) {
     event.stopPropagation();
     setSelectedId(item.id);
     setActivePage(item.page);
-    // A direct text edit must stay on the text it replaces, otherwise the
-    // original glyphs would be revealed beneath the new text.
-    if (mode !== "select" || item.type === "text-edit") return;
+    if (mode !== "select") return;
     const surface = event.currentTarget.closest<HTMLElement>("[data-page-surface]");
     const page = pages.find((entry) => entry.number === item.page);
     if (!surface || !page) return;
@@ -1425,6 +1624,14 @@ export function PdfEditor() {
               y2: clamp(y + lengthY, 0, drag.page.heightPt),
             };
           }
+          if (entry.type === "text-edit" && drag.origin.type === "text-edit") {
+            return {
+              ...entry,
+              x: clamp(drag.origin.x + dx, 0, drag.page.widthPt),
+              y: clamp(drag.origin.y + dy, 0, drag.page.heightPt),
+              baseline: (drag.origin.baseline ?? drag.origin.y + drag.origin.h) + dy,
+            };
+          }
           return {
             ...entry,
             x: clamp(drag.origin.x + dx, 0, drag.page.widthPt),
@@ -1443,8 +1650,8 @@ export function PdfEditor() {
   }
 
   function beginResize(
-    event: React.PointerEvent<HTMLSpanElement>,
-    item: ImageItem | ShapeItem,
+    event: React.PointerEvent<Element>,
+    item: ImageItem | ShapeItem | DrawingItem,
   ) {
     event.stopPropagation();
     event.preventDefault();
@@ -1464,7 +1671,7 @@ export function PdfEditor() {
       const dh = ((moveEvent.clientY - startY) / rect.height) * page.heightPt;
       setItems((current) =>
         current.map((entry) =>
-          entry.id === item.id && (entry.type === "image" || entry.type === "rect" || entry.type === "ellipse")
+          entry.id === item.id && (entry.type === "image" || entry.type === "rect" || entry.type === "ellipse" || entry.type === "drawing")
             ? {
                 ...entry,
                 w: clamp(item.w + dw, 8, page.widthPt * 2),
@@ -1537,7 +1744,10 @@ export function PdfEditor() {
   function removeSelected() {
     if (!selectedId) return;
     recordHistory();
-    setItems((current) => current.filter((item) => item.id !== selectedId));
+    setItems((current) => current.flatMap((item) => {
+      if (item.id !== selectedId) return [item];
+      return item.type === "drawing" ? [{ ...item, deleted: true }] : [];
+    }));
     setSelectedId(null);
   }
 
@@ -1985,14 +2195,106 @@ export function PdfEditor() {
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
-                      src={page.url}
+                      src={drawingBackgrounds[page.number] ?? page.url}
                       alt={`Halaman ${page.number}`}
                       draggable={false}
                       className="pointer-events-none absolute inset-0 h-full w-full"
                     />
+                    {page.drawings.length > 0 && (
+                      <svg
+                        className="absolute inset-0 h-full w-full"
+                        viewBox={`0 0 ${page.widthPt} ${page.heightPt}`}
+                        preserveAspectRatio="none"
+                        aria-label="Shape dan garis pada dokumen"
+                      >
+                        {page.drawings.map((drawing) => {
+                          const itemId = `drawing-${page.number}-${drawing.id}`;
+                          const edited = items.find(
+                            (entry) => entry.type === "drawing" && entry.id === itemId,
+                          ) as DrawingItem | undefined;
+                          if (edited?.deleted) return null;
+                          const x = edited?.x ?? drawing.x;
+                          const y = edited?.y ?? drawing.y;
+                          const w = edited?.w ?? drawing.w;
+                          const h = edited?.h ?? drawing.h;
+                          const scaleX = w / Math.max(0.5, drawing.w);
+                          const scaleY = h / Math.max(0.5, drawing.h);
+                          const transform = `matrix(${scaleX},0,0,${scaleY},${x - drawing.x * scaleX},${y - drawing.y * scaleY})`;
+                          const cleanBackground = Boolean(drawingBackgrounds[page.number]);
+                          const active = selectedId === itemId;
+                          const stroke = edited?.stroke ?? drawing.stroke;
+                          const fill = edited
+                            ? (edited.hasFill ? edited.fill : "none")
+                            : drawing.fill;
+                          const strokeWidth = edited?.strokeWidth ?? drawing.stroke_width;
+                          return (
+                            <g key={itemId} transform={transform}>
+                              <path
+                                d={drawing.path}
+                                fill={cleanBackground ? fill : "transparent"}
+                                fillOpacity={edited?.fillOpacity ?? drawing.fill_opacity}
+                                stroke={cleanBackground ? stroke : "transparent"}
+                                strokeOpacity={edited?.strokeOpacity ?? drawing.stroke_opacity}
+                                strokeWidth={cleanBackground ? strokeWidth : Math.max(8, strokeWidth)}
+                                strokeDasharray={drawing.dashes.length ? drawing.dashes.join(" ") : undefined}
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                pointerEvents="all"
+                                onPointerDown={(event) => beginDrawingInteraction(event, page, drawing)}
+                                className={mode === "select" ? "cursor-move" : "cursor-crosshair"}
+                              />
+                              {active && cleanBackground && edited && (
+                                <>
+                                  <rect
+                                    x={edited.x}
+                                    y={edited.y}
+                                    width={edited.w}
+                                    height={edited.h}
+                                    fill="none"
+                                    stroke="hsl(var(--primary))"
+                                    strokeDasharray="3 2"
+                                    strokeWidth={1}
+                                    pointerEvents="none"
+                                  />
+                                  <circle
+                                    cx={edited.x + edited.w}
+                                    cy={edited.y + edited.h}
+                                    r={4}
+                                    fill="hsl(var(--primary))"
+                                    stroke="white"
+                                    strokeWidth={1}
+                                    className="pointer-events-auto cursor-nwse-resize"
+                                    onPointerDown={(event) => beginResize(event, edited)}
+                                  />
+                                </>
+                              )}
+                            </g>
+                          );
+                        })}
+                      </svg>
+                    )}
                     <div className="pointer-events-none absolute inset-0">
                       {items
-                        .filter((item) => item.page === page.number)
+                        .filter((item) => item.page === page.number && item.type === "text-edit" && item.source)
+                        .map((item) => {
+                          if (item.type !== "text-edit" || !item.source) return null;
+                          const moved = Math.abs(item.x - item.source.x) > 0.25 || Math.abs(item.y - item.source.y) > 0.25;
+                          if (!moved) return null;
+                          return (
+                            <div
+                              key={`source-mask-${item.id}`}
+                              className="absolute bg-white"
+                              style={{
+                                left: item.source.x * (page.displayWidth / page.widthPt),
+                                top: item.source.y * (page.displayHeight / page.heightPt),
+                                width: item.source.w * (page.displayWidth / page.widthPt),
+                                height: item.source.h * (page.displayHeight / page.heightPt),
+                              }}
+                            />
+                          );
+                        })}
+                      {items
+                        .filter((item) => item.page === page.number && item.type !== "drawing")
                         .map((item) => (
                           <EditorElement
                             key={item.id}
@@ -2063,8 +2365,7 @@ export function PdfEditor() {
                             type="button"
                             className="pointer-events-auto absolute rounded-[2px] border border-transparent transition-colors hover:border-primary/60 hover:bg-primary/10 focus-visible:border-primary focus-visible:bg-primary/10"
                             style={{ left, top, width, height }}
-                            onClick={() => beginRunEdit(run)}
-                            onPointerDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => beginRunInteraction(event, run)}
                             title={`Klik untuk mengedit kata: ${run.text.trim().slice(0, 80)}`}
                             aria-label={`Edit kata: ${run.text.trim().slice(0, 60)}`}
                           />
@@ -2253,11 +2554,11 @@ export function PdfEditor() {
                   </div>
                 )}
 
-                {(selected?.type === "rect" || selected?.type === "ellipse") && (
+                {(selected?.type === "rect" || selected?.type === "ellipse" || selected?.type === "drawing") && (
                   <>
                     <div className="grid grid-cols-2 gap-2">
                       <div className="space-y-1.5">
-                        <Label htmlFor="shape-stroke">Garis</Label>
+                        <Label htmlFor="shape-stroke">Warna garis</Label>
                         <input
                           id="shape-stroke"
                           type="color"
@@ -2502,7 +2803,7 @@ function EditorElement({
   scaleX: number;
   scaleY: number;
   onPointerDown: (event: React.PointerEvent<HTMLDivElement>, item: EditItem) => void;
-  onResize: (event: React.PointerEvent<HTMLSpanElement>, item: ImageItem | ShapeItem) => void;
+  onResize: (event: React.PointerEvent<HTMLSpanElement>, item: ImageItem | ShapeItem | DrawingItem) => void;
   onResizeLine: (
     event: React.PointerEvent<HTMLSpanElement>,
     item: LineItem,
@@ -2708,6 +3009,23 @@ function DraftShape({ draft, page }: { draft: Draft; page: EditorPage }) {
 
 function serializeItems(items: EditItem[]): Record<string, unknown>[] {
   return items.map((item) => {
+    if (item.type === "drawing") {
+      return {
+        type: "background-drawing",
+        page: item.page,
+        drawing_id: item.drawingId,
+        x: round(item.x),
+        y: round(item.y),
+        w: round(item.w),
+        h: round(item.h),
+        stroke: item.stroke,
+        fill: item.hasFill ? item.fill : null,
+        stroke_width: round(item.strokeWidth),
+        stroke_opacity: item.strokeOpacity,
+        fill_opacity: item.fillOpacity,
+        deleted: item.deleted,
+      };
+    }
     if (item.type === "text") {
       return {
         type: "text",
@@ -2749,6 +3067,15 @@ function serializeItems(items: EditItem[]): Record<string, unknown>[] {
         italic: item.italic,
         auto_style: item.autoStyle,
         baseline: round(item.baseline ?? item.y + item.h),
+        source: item.source,
+        source_rect: item.source
+          ? {
+              x: round(item.source.x),
+              y: round(item.source.y),
+              w: round(item.source.w),
+              h: round(item.source.h),
+            }
+          : undefined,
       };
     }
     if (item.type === "line") {
