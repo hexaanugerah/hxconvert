@@ -527,6 +527,23 @@ def _convert_auto_mode(
         )
         return result
 
+    # Vector grids in complex forms move when Word or LibreOffice substitutes
+    # fonts or rounds table measurements. Rasterize Auto-mode forms losslessly
+    # so their text, rules, and shapes remain in the source PDF positions.
+    complex_pages = [info.index + 1 for info in page_analysis if info.complex_table]
+    if complex_pages:
+        pages_info = [
+            (info.index + 1, info.width, info.height) for info in page_analysis
+        ]
+        result = _convert_image_only(ctx, doc, pages_info, page_count)
+        result.warnings.insert(
+            0,
+            "PDF ini berisi tabel atau form dengan garis dan posisi rapat. Mode Otomatis "
+            "menyimpan halaman sebagai gambar 300 DPI agar teks, tabel, dan bentuk "
+            "tetap sesuai PDF asli. Teks dalam file Word hasil konversi tidak dapat diedit.",
+        )
+        return result
+
     # Mixed document with scanned pages: layout mode preserves everything visually.
     if "image-only" in page_classes and (
         "text-only" in page_classes or "mixed" in page_classes or "vector" in page_classes
