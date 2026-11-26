@@ -22,6 +22,7 @@ import { useAuthStore } from "@/store/auth";
 
 const NAV = [
   { href: "/", label: "Beranda" },
+  { href: "/edit", label: "Edit Dokumen" },
   { href: "/tools", label: "Alat Konversi" },
   { href: "/#fitur", label: "Fitur" },
   { href: "/history", label: "Riwayat" },

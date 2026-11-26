@@ -1646,10 +1646,10 @@ export function PdfEditor() {
     return (
       <div className="container max-w-4xl pt-8 pb-16 sm:pt-10">
         <Link
-          href="/tools"
+          href="/edit"
           className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
         >
-          <ArrowLeft className="h-4 w-4" /> Semua alat
+          <ArrowLeft className="h-4 w-4" /> Semua editor
         </Link>
         <div className="mt-5 flex items-start gap-4">
           <span className="grid h-12 w-12 place-items-center rounded-xl bg-primary/10 text-primary">
@@ -1731,10 +1731,10 @@ export function PdfEditor() {
     <div className="container max-w-7xl pt-8 pb-24 sm:pt-10">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Link
-          href="/tools"
+          href="/edit"
           className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
         >
-          <ArrowLeft className="h-4 w-4" /> Semua alat
+          <ArrowLeft className="h-4 w-4" /> Semua editor
         </Link>
         <Button type="button" variant="ghost" size="sm" onClick={resetEditor} disabled={busy}>
           <RotateCcw className="h-3.5 w-3.5" /> Ganti PDF
