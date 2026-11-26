@@ -248,7 +248,7 @@ function splitTextIntoWordBoxes(
   italic: boolean,
   context: CanvasRenderingContext2D,
 ): { text: string; x: number; w: number }[] {
-  let parts = text.match(/\s+|[^\s]+/gu) ?? [];
+  let parts: string[] = text.match(/\s+|[^\s]+/gu) ?? [];
   if (
     parts.length === 1 &&
     !/\s/u.test(text) &&
