@@ -238,6 +238,44 @@ function inferRunFont(
   return { font: monospace ? "courier" : serif ? "times" : "helv", bold, italic };
 }
 
+function splitTextIntoWordBoxes(
+  text: string,
+  x: number,
+  width: number,
+  size: number,
+  family: string,
+  bold: boolean,
+  italic: boolean,
+  context: CanvasRenderingContext2D,
+): { text: string; x: number; w: number }[] {
+  let parts = text.match(/\s+|[^\s]+/gu) ?? [];
+  if (
+    parts.length === 1 &&
+    !/\s/u.test(text) &&
+    /[\u2e80-\u9fff\uf900-\ufaff\uac00-\ud7af]/u.test(text)
+  ) {
+    parts = Array.from(text);
+  }
+  const previousFont = context.font;
+  context.font = `${italic ? "italic " : ""}${bold ? "700 " : "400 "}${Math.max(1, size)}px ${family || "sans-serif"}`;
+  const measured = parts.map((part) => context.measureText(part).width);
+  context.font = previousFont;
+
+  const total = measured.reduce((sum, partWidth) => sum + partWidth, 0);
+  const fallbackTotal = parts.reduce((sum, part) => sum + Array.from(part).length, 0) || 1;
+  const scale = width / (total > 0 ? total : fallbackTotal);
+  let offset = 0;
+  const boxes: { text: string; x: number; w: number }[] = [];
+  parts.forEach((part, index) => {
+    const partWidth = (total > 0 ? measured[index] : Array.from(part).length) * scale;
+    if (!/^\s+$/u.test(part)) {
+      boxes.push({ text: part, x: x + offset, w: partWidth });
+    }
+    offset += partWidth;
+  });
+  return boxes;
+}
+
 function runIsCovered(run: PdfTextRun, items: EditItem[]): boolean {
   return items.some(
     (item) =>
@@ -594,13 +632,9 @@ export function PdfEditor() {
             try {
               const content = await page.getTextContent();
               const styles = content.styles as Record<string, { fontFamily?: string }>;
-              for (const raw of content.items) {
+              textItems: for (const raw of content.items) {
                 if (!("str" in raw)) continue;
                 if (!raw.str.trim()) continue;
-                if (texts.length >= MAX_TEXT_RUNS_PER_PAGE) {
-                  textsTruncated = true;
-                  break;
-                }
                 const width = raw.width;
                 const fontSize = Math.max(
                   4,
@@ -612,21 +646,37 @@ export function PdfEditor() {
                 if (x < -2 || top < -2 || x > base.width || top > base.height) continue;
                 const family = styles?.[raw.fontName]?.fontFamily ?? "";
                 const { font, bold, italic } = inferRunFont(raw.fontName, family);
-                texts.push({
-                  id: newId(),
-                  page: number,
-                  text: raw.str,
+                const words = splitTextIntoWordBoxes(
+                  raw.str,
                   x,
-                  y: top,
-                  w: width,
-                  h: fontSize,
-                  size: fontSize,
-                  font,
+                  width,
+                  fontSize,
+                  family,
                   bold,
                   italic,
-                  color: "#111111",
-                  source: "pdf",
-                });
+                  context,
+                );
+                for (const word of words) {
+                  if (texts.length >= MAX_TEXT_RUNS_PER_PAGE) {
+                    textsTruncated = true;
+                    break textItems;
+                  }
+                  texts.push({
+                    id: newId(),
+                    page: number,
+                    text: word.text,
+                    x: word.x,
+                    y: top,
+                    w: Math.max(0.5, word.w),
+                    h: fontSize,
+                    size: fontSize,
+                    font,
+                    bold,
+                    italic,
+                    color: "#111111",
+                    source: "pdf",
+                  });
+                }
               }
             } catch {
               // A PDF without a usable text layer is still editable with new
@@ -940,24 +990,40 @@ export function PdfEditor() {
     try {
       const layout = await getOcrPageLayout(file, page.number, ocrLanguageRef.current);
       if (pdfFileRef.current !== file) return;
+      const wordContext = document.createElement("canvas").getContext("2d");
       const runs: PdfTextRun[] = layout.runs
         .filter((run) => run.text.trim() && run.w >= 2 && run.h >= 2)
-        .map((run) => ({
-          id: newId(),
-          page: page.number,
-          text: run.text,
-          x: run.x,
-          y: run.y,
-          w: run.w,
-          h: run.h,
-          size: Math.max(6, Math.min(72, round(run.h * 0.72))),
-          font: "helv",
-          bold: false,
-          italic: false,
-          color: "#111111",
-          baseline: run.y + run.h * 0.82,
-          source: "ocr",
-        }));
+        .flatMap((run) => {
+          const size = Math.max(6, Math.min(72, round(run.h * 0.72)));
+          const boxes = wordContext
+            ? splitTextIntoWordBoxes(
+                run.text,
+                run.x,
+                run.w,
+                size,
+                FONT_STACK.helv,
+                false,
+                false,
+                wordContext,
+              )
+            : [{ text: run.text, x: run.x, w: run.w }];
+          return boxes.map((word) => ({
+            id: newId(),
+            page: page.number,
+            text: word.text,
+            x: word.x,
+            y: run.y,
+            w: Math.max(0.5, word.w),
+            h: run.h,
+            size,
+            font: "helv" as const,
+            bold: false,
+            italic: false,
+            color: "#111111",
+            baseline: run.y + run.h * 0.82,
+            source: "ocr" as const,
+          }));
+        });
       if (!runs.length) {
         ocrRequestedRef.current.delete(ocrRequestKey(file, page.number));
         toast.message("OCR tidak menemukan teks di halaman ini.");
@@ -975,8 +1041,8 @@ export function PdfEditor() {
             : entry,
         ),
       );
-      toast.success(`${runs.length} baris teks terdeteksi`, {
-        description: "Klik teks pada halaman untuk mengeditnya langsung.",
+      toast.success(`${runs.length} kata teks terdeteksi`, {
+        description: "Klik satu kata pada halaman untuk mengeditnya.",
       });
     } catch (error) {
       ocrRequestedRef.current.delete(ocrRequestKey(file, page.number));
@@ -1241,6 +1307,7 @@ export function PdfEditor() {
       recordHistory();
       setItems((current) => [...current, item]);
       setSelectedId(item.id);
+      setMode("select");
       return;
     }
     const width = Math.abs(finished.x1 - finished.x0);
@@ -1262,6 +1329,7 @@ export function PdfEditor() {
     recordHistory();
     setItems((current) => [...current, item]);
     setSelectedId(item.id);
+    setMode("select");
   }
 
   function handleSurfacePointerDown(event: React.PointerEvent<HTMLDivElement>, page: EditorPage) {
@@ -1404,6 +1472,42 @@ export function PdfEditor() {
               }
             : entry,
         ),
+      );
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  function beginResizeLine(
+    event: React.PointerEvent<HTMLSpanElement>,
+    item: LineItem,
+    endpoint: "start" | "end",
+  ) {
+    event.stopPropagation();
+    event.preventDefault();
+    const surface = event.currentTarget.closest<HTMLElement>("[data-page-surface]");
+    const page = pages.find((entry) => entry.number === item.page);
+    if (!surface || !page) return;
+    setSelectedId(item.id);
+    const rect = surface.getBoundingClientRect();
+    let recorded = false;
+    const onMove = (moveEvent: PointerEvent) => {
+      const point = pointFromEvent(moveEvent.clientX, moveEvent.clientY, page, rect);
+      if (!recorded) {
+        recordHistory();
+        recorded = true;
+      }
+      setItems((current) =>
+        current.map((entry) => {
+          if (entry.id !== item.id || entry.type !== "line") return entry;
+          return endpoint === "start"
+            ? { ...entry, x: point.x, y: point.y }
+            : { ...entry, x2: point.x, y2: point.y };
+        }),
       );
     };
     const onUp = () => {
@@ -1899,6 +2003,7 @@ export function PdfEditor() {
                             scaleY={page.displayHeight / page.heightPt}
                             onPointerDown={beginDrag}
                             onResize={beginResize}
+                            onResizeLine={beginResizeLine}
                             onOpenTextEdit={beginItemEdit}
                           />
                         ))}
@@ -1960,8 +2065,8 @@ export function PdfEditor() {
                             style={{ left, top, width, height }}
                             onClick={() => beginRunEdit(run)}
                             onPointerDown={(event) => event.stopPropagation()}
-                            title={`Klik untuk mengedit: ${run.text.trim().slice(0, 80)}`}
-                            aria-label={`Edit teks: ${run.text.trim().slice(0, 60)}`}
+                            title={`Klik untuk mengedit kata: ${run.text.trim().slice(0, 80)}`}
+                            aria-label={`Edit kata: ${run.text.trim().slice(0, 60)}`}
                           />
                         );
                         })}
@@ -2388,6 +2493,7 @@ function EditorElement({
   scaleY,
   onPointerDown,
   onResize,
+  onResizeLine,
   onOpenTextEdit,
 }: {
   item: EditItem;
@@ -2397,6 +2503,11 @@ function EditorElement({
   scaleY: number;
   onPointerDown: (event: React.PointerEvent<HTMLDivElement>, item: EditItem) => void;
   onResize: (event: React.PointerEvent<HTMLSpanElement>, item: ImageItem | ShapeItem) => void;
+  onResizeLine: (
+    event: React.PointerEvent<HTMLSpanElement>,
+    item: LineItem,
+    endpoint: "start" | "end",
+  ) => void;
   onOpenTextEdit: (item: TextEditItem) => void;
 }) {
   const common = {
@@ -2509,6 +2620,20 @@ function EditorElement({
             marginTop: 5,
           }}
         />
+        {selected && (
+          <>
+            <span
+              role="presentation"
+              onPointerDown={(event) => onResizeLine(event, item, "start")}
+              className="absolute -left-1.5 top-[-1px] z-10 h-3 w-3 rounded-full border border-white bg-primary shadow"
+            />
+            <span
+              role="presentation"
+              onPointerDown={(event) => onResizeLine(event, item, "end")}
+              className="absolute -right-1.5 top-[-1px] z-10 h-3 w-3 rounded-full border border-white bg-primary shadow"
+            />
+          </>
+        )}
       </div>
     );
   }
