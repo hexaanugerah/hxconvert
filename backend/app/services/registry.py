@@ -14,6 +14,7 @@ from app.services import (
     excel_ops,
     html_ops,
     image_ops,
+    pdf_editor,
     pdf_ops,
     pdf_to_docx,
     pdf_to_excel,
@@ -46,7 +47,7 @@ CATEGORIES = [
 class ToolOption:
     name: str
     label: str
-    type: str = "text"  # select | text | number | checkbox | pages
+    type: str = "text"  # select | text | number | checkbox | pages | json
     default: Any = None
     choices: tuple[dict[str, Any], ...] = ()
     help: str | None = None
@@ -310,6 +311,52 @@ TOOLS: tuple[ToolSpec, ...] = (
         ),
     ),
     # ------------------------------- PDF utilities
+    ToolSpec(
+        id="edit-pdf",
+        label="Edit PDF",
+        description=(
+            "Edit PDF langsung di aplikasi: klik teks lama untuk menggantinya, atau tambahkan "
+            "teks, gambar, kotak, elips, dan garis. Hasil PDF bisa diunduh, dan versi Word bisa "
+            "dibuat untuk pengeditan lanjutan di luar aplikasi."
+        ),
+        category="manage",
+        inputs=(".pdf", ".png", ".jpg", ".jpeg", ".webp"),
+        output="pdf",
+        output_filename="edited",
+        multiple=True,
+        min_files=1,
+        max_files=6,
+        handler=pdf_editor.apply_edits,
+        options=(
+            ToolOption(
+                name="edits",
+                label="Data edit",
+                type="json",
+                default="{}",
+                hidden=True,
+                help="Diisi otomatis oleh editor PDF di aplikasi.",
+            ),
+            ToolOption(
+                name="ocr_language",
+                label="Bahasa OCR otomatis",
+                type="select",
+                default="eng+ind",
+                hidden=True,
+                choices=(
+                    {"value": "eng+ind", "label": "English + Bahasa Indonesia"},
+                    {"value": "ind", "label": "Bahasa Indonesia"},
+                    {"value": "eng", "label": "English"},
+                ),
+                help="Dipakai hanya saat halaman hasil pindai memerlukan OCR otomatis.",
+            ),
+        ),
+        processing_note=(
+            "Pengeditan teks lama menutup area teks yang diklik lalu menulis teks baru di "
+            "posisi yang sama, mengikuti warna, ukuran, dan font aslinya. Font yang tertanam di "
+            "PDF dipakai ulang bila mendukung teks baru. Halaman hasil pindai dideteksi otomatis "
+            "dengan OCR saat terlihat agar teksnya bisa diklik dan diedit."
+        ),
+    ),
     ToolSpec(
         id="merge-pdf",
         label="Gabungkan PDF",

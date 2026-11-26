@@ -98,6 +98,14 @@ def validate_options(tool: ToolSpec, raw: dict) -> dict:
         elif option.type == "select":
             allowed = {choice["value"] for choice in option.choices}
             resolved[option.name] = value if value in allowed else option.default
+        elif option.type == "json":
+            # The PDF editor sends its element list as JSON; it can be larger
+            # than a normal text option, but stays bounded.
+            resolved[option.name] = (
+                json.dumps(value)
+                if isinstance(value, (dict, list))
+                else str(value)[:200_000]
+            )
         else:
             resolved[option.name] = str(value)[:2000]
     return resolved

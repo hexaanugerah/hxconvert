@@ -36,7 +36,7 @@ export const CATEGORY_META: Record<
   },
   manage: {
     label: "Kelola PDF",
-    description: "Gabungkan, pisah, putar, potong, urutkan, dan beri tanda air.",
+    description: "Edit, gabungkan, pisah, putar, potong, urutkan, dan beri tanda air.",
     icon: Files,
   },
   optimize: {
@@ -82,6 +82,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   "pdf-to-pptx": Presentation,
   "pdf-to-images": FileImage,
   "image-to-pdf": FileImage,
+  "edit-pdf": PenTool,
   "merge-pdf": Sparkles,
   "split-pdf": FileText,
   "rotate-pdf": FileText,
