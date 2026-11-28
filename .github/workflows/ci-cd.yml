@@ -164,8 +164,12 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ============================================
-  # DEPLOY (Manual approval for production)
+  # DEPLOY
   # ============================================
+  # Staging belum punya server; langkahnya sengaja hanya mencatat pesan.
+  # Production men-deploy VPS lewat SSH bila secrets-nya diisi (lihat
+  # DEPLOYMENT.md). Railway/Vercel terpisah: keduanya men-deploy sendiri
+  # langsung dari repo git.
   deploy-staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
@@ -184,20 +188,46 @@ jobs:
     needs: [build-backend, build-frontend]
     if: github.ref == 'refs/heads/main'
     environment: production
+    # Deploy berjalan berurutan; deploy yang sedang berjalan tidak dibatalkan
+    # oleh push berikutnya agar container tidak tertinggal setengah jadi.
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
     steps:
-      - name: Deploy to production server
+      # Server produksi bersifat opsional: Railway/Vercel men-deploy sendiri dari
+      # repo git. Bila kredensial VPS belum diisi, job ini selesai hijau dengan
+      # pesan "dilewati" supaya pipeline tidak terlihat seperti sudah deploy.
+      - name: Cek kredensial server
+        id: preflight
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
         run: |
-          echo "Deploy to production via SSH/Ansible/Kubernetes"
-          # Add your production deployment commands here
-      # Example: SSH deploy
-      # - name: Deploy via SSH
-      #   uses: appleboy/ssh-action@v1
-      #   with:
-      #     host: ${{ secrets.PROD_HOST }}
-      #     username: ${{ secrets.PROD_USER }}
-      #     key: ${{ secrets.PROD_SSH_KEY }}
-      #     script: |
-      #       cd /opt/docuconvert
-      #       docker compose --env-file .env.production pull
-      #       docker compose --env-file .env.production up -d --remove-orphans
-      #       docker image prune -f
+          if [[ -n "$PROD_HOST" && -n "$PROD_USER" && -n "$PROD_SSH_KEY" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy SSH ke $PROD_USER@$PROD_HOST akan dijalankan."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy VPS dilewati: isi secrets PROD_HOST, PROD_USER, dan PROD_SSH_KEY (lihat DEPLOYMENT.md)."
+          fi
+
+      - name: Deploy via SSH
+        if: steps.preflight.outputs.enabled == 'true'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_PORT || '22' }}
+          # Build image LibreOffice/Tesseract di server bisa memakan waktu.
+          command_timeout: 30m
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.PROD_PATH || '/opt/docuconvert' }}"
+            git fetch --prune origin main
+            git reset --hard origin/main
+            # deploy.sh membangun image, menjalankan migrasi, memuat ulang TLS,
+            # lalu memverifikasi https://$DOMAIN/api/v1/health.
+            bash ./deploy.sh production

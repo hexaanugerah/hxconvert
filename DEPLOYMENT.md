@@ -65,6 +65,33 @@ chmod +x deploy.sh
 - Visit `https://HXconvert.com`
 - API docs at `https://HXconvert.com/api/v1/docs`
 
+#### Deploy otomatis dari GitHub Actions (VPS)
+
+Job `deploy-production` di `.github/workflows/ci-cd.yml` men-deploy lewat SSH
+setiap push ke `main`, setelah job lint/test dan build image selesai. Isi
+secrets repository (Settings → Secrets and variables → Actions):
+
+| Secret | Wajib | Isi |
+|--------|-------|-----|
+| `PROD_HOST` | Ya | IP atau hostname server |
+| `PROD_USER` | Ya | User SSH non-root (pemilik Docker) |
+| `PROD_SSH_KEY` | Ya | Private key SSH (OpenSSH) untuk user tersebut |
+| `PROD_PORT` | No | Port SSH, default `22` |
+| `PROD_PATH` | No | Direktori checkout di server, default `/opt/docuconvert` |
+
+Langkah di server: `git fetch origin main`, `git reset --hard origin/main`,
+lalu `bash ./deploy.sh production`. Artinya server harus sudah punya
+`.env.production` dan akses git ke repo ini (deploy key atau kredensial HTTPS).
+
+Bila ketiga secret wajib belum diisi, langkah deploy **dilewati dengan pesan
+notice** dan job tetap hijau — bukan gagal dan bukan pura-pura berhasil.
+Aktifkan juga *required reviewers* pada environment `production` bila deploy
+perlu persetujuan manual.
+
+Untuk membatalkan deploy VPS sepenuhnya, hapus job `deploy-production` dari
+workflow; Railway dan Vercel tetap men-deploy sendiri karena terhubung langsung
+ke repo git.
+
 ### Option 2: Vercel + Railway + TiDB Cloud
 
 Split deployment: Next.js on Vercel, FastAPI on Railway, and TiDB Cloud
@@ -89,11 +116,25 @@ Full runbook: [`docs/DEPLOY_VERCEL_RAILWAY_TIDB.md`](docs/DEPLOY_VERCEL_RAILWAY_
 
 ### Option 3: Render
 
-1. Create new Web Service from GitHub
-2. Build command: `cd backend && pip install -r requirements.txt`
-3. Start command: `cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-4. Add PostgreSQL database
-5. Set environment variables
+Blueprint siap pakai ada di `render.yaml` (satu container: nginx + Next.js +
+FastAPI, lihat `render/Dockerfile`).
+
+1. Buka
+   `https://dashboard.render.com/blueprint/new?repo=https://github.com/hexaanugerah/hxconvert`
+   (atau Dashboard → **New** → **Blueprint** → pilih repo ini), lalu **Apply**.
+2. Render membaca `render.yaml`: service `hxconvert-demo`, region Singapore,
+   plan Free, health check `/api/v1/health`, dan auto-deploy setiap commit.
+3. Setelah aktif, setiap push ke `main` langsung men-deploy ulang. URL demo
+   menjadi `https://hxconvert-demo.onrender.com`.
+
+> Plan Free tidur saat tidak dipakai (cold start ~50 detik) dan memakai SQLite
+> di disk ephemeral: data hilang saat redeploy. LibreOffice dan OCR tidak
+> terpasang, jadi alat yang membutuhkannya dilaporkan tidak tersedia.
+
+Alternatif tanpa Blueprint: buat Web Service dari GitHub dengan build command
+`cd backend && pip install -r requirements.txt` dan start command
+`cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`,
+lalu tambahkan PostgreSQL dan environment variables.
 
 ### Option 4: Fly.io
 

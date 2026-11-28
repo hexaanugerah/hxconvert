@@ -4,7 +4,11 @@
 # LibreOffice dan OCR tidak tersedia, jadi sebagian alat ditandai "tidak
 # tersedia" di UI dan DOCX/XLSX -> PDF memakai fallback HTML.
 #
-# Deploy: Render Dashboard -> New -> Blueprint -> pilih repo ini.
+# Deploy: buka
+# https://dashboard.render.com/blueprint/new?repo=https://github.com/hexaanugerah/hxconvert
+# atau Render Dashboard -> New -> Blueprint -> pilih repo ini, lalu Apply.
+# Setelah Blueprint aktif, setiap push ke main otomatis men-deploy ulang
+# (autoDeployTrigger: commit).
 
 services:
   - type: web
