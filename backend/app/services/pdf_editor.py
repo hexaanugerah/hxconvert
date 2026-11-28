@@ -791,6 +791,40 @@ def _replace_text(
             break
 
 
+def _external_edit_notes(doc: fitz.Document) -> list[str]:
+    """Explain PDF features that still block editing in Acrobat Reader/Pro.
+
+    The editor can rewrite any PDF PyMuPDF can open, but a few document types
+    make the *result* resist editing in Adobe's own editor: XFA/LiveCycle forms
+    open in a dedicated form view, and a certified/signed document loses its
+    signature (and may become locked) as soon as its content changes.
+    """
+    notes: list[str] = []
+    try:
+        if doc.is_form_pdf:
+            kind, _value = doc.xref_get_key(doc.pdf_catalog(), "AcroForm/XFA")
+            if kind not in ("null", "none"):
+                notes.append(
+                    "PDF ini memakai formulir XFA (Adobe LiveCycle). Acrobat membuka "
+                    "formulir seperti itu dalam mode formulir khusus, sehingga isi hasil "
+                    "edit tidak bisa diubah langsung di sana. Gunakan versi Word dari "
+                    "editor ini bila teks perlu diubah lagi."
+                )
+    except Exception:
+        pass
+    try:
+        # 3 means every signature field is signed (a certified document).
+        if doc.get_sigflags() == 3:
+            notes.append(
+                "PDF ini sudah ditandatangani secara digital. Setiap perubahan isi "
+                "membatalkan tanda tangan tersebut, dan Acrobat dapat menampilkan hasil "
+                "edit sebagai dokumen yang tidak boleh diubah."
+            )
+    except Exception:
+        pass
+    return notes
+
+
 def apply_edits(ctx: ConversionContext) -> ConversionResult:
     pdf_inputs = [path for path in ctx.inputs if path.suffix.lower() == ".pdf"]
     image_paths = [
@@ -835,7 +869,7 @@ def apply_edits(ctx: ConversionContext) -> ConversionResult:
     from app.services.pdf_ops import _open_pdf
 
     doc = _open_pdf(pdf_inputs[0])
-    warnings: list[str] = []
+    warnings: list[str] = _external_edit_notes(doc)
     output = ctx.workdir / "edited.pdf"
     try:
         direct_edits = [

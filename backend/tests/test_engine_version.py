@@ -17,7 +17,7 @@ from tests.conftest import upload
 
 # Update both constants in the same commit that bumps ENGINE_VERSION in
 # app/services/result_cache.py.
-RECORDED_ENGINE_VERSION = "2026-11-25.2"
+RECORDED_ENGINE_VERSION = "2026-11-28.1"
 RECORDED_FINGERPRINTS = {
     "editable": "d5b88de568ff32b0ee8d4a98b267e0d82f46d75dfc110a48bef11677d7c5a92e",
     "layout": "84ddcb7c267ce7357b6a5f3a065282cd625d14abcd0189447965b1c6bdd40e96",

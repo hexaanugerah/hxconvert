@@ -117,7 +117,8 @@ def test_design_page_is_detected():
     assert all(info.complex_table is False for info in infos)
 
 
-def test_auto_mode_routes_design_pages_to_full_image(tmp_path, monkeypatch):
+def test_auto_mode_keeps_design_page_text_editable(tmp_path, monkeypatch):
+    """Text drawn over artwork must stay editable instead of becoming a picture."""
     calls: list[str] = []
 
     def fake_images(ctx, doc, pages_info, total_pages, *, dpi=300, jpeg_quality=None):
@@ -144,8 +145,9 @@ def test_auto_mode_routes_design_pages_to_full_image(tmp_path, monkeypatch):
 
     result = pdf_to_docx.convert(_context(tmp_path, _design_pdf()))
 
-    assert calls == ["images"]
-    assert any("halaman desain/visual" in warning for warning in result.warnings)
+    assert calls == ["layout"]
+    assert any("desain/visual" in warning for warning in result.warnings)
+    assert not any("tidak dapat diedit" in warning for warning in result.warnings)
 
 
 def test_pdf_to_word_ui_is_automatic_only():
@@ -163,9 +165,32 @@ def test_pdf_to_word_ui_is_automatic_only():
     assert validate_options(tool, {"mode": "layout"})["mode"] == "layout"
 
 
-def test_auto_mode_renders_complex_form_as_image_to_preserve_exact_layout(
-    tmp_path, monkeypatch
-):
+def test_auto_mode_keeps_complex_form_text_editable(tmp_path, monkeypatch):
+    calls: list[str] = []
+
+    def fake_layout(ctx, scanned_pages, page_count, source_image_count):
+        calls.append("layout")
+        return ConversionResult(
+            tmp_path / "layout.docx", "layout.docx", pdf_to_docx.DOCX_MIME, []
+        )
+
+    def fake_images(ctx, doc, pages_info, total_pages, *, dpi=300, jpeg_quality=None):
+        calls.append("images")
+        return ConversionResult(
+            tmp_path / "images.docx", "images.docx", pdf_to_docx.DOCX_MIME, []
+        )
+
+    monkeypatch.setattr(pdf_to_docx, "_convert_layout_mode", fake_layout)
+    monkeypatch.setattr(pdf_to_docx, "_convert_image_only", fake_images)
+
+    result = pdf_to_docx.convert(_context(tmp_path, _form_pdf()))
+
+    assert calls == ["layout"]
+    assert any("form kompleks" in warning for warning in result.warnings)
+    assert not any("tidak dapat diedit" in warning for warning in result.warnings)
+
+
+def test_auto_mode_warns_when_scanned_pdf_stays_image_only(tmp_path, monkeypatch):
     calls: list[str] = []
 
     def fake_images(ctx, doc, pages_info, total_pages, *, dpi=300, jpeg_quality=None):
@@ -174,20 +199,20 @@ def test_auto_mode_renders_complex_form_as_image_to_preserve_exact_layout(
             tmp_path / "images.docx", "images.docx", pdf_to_docx.DOCX_MIME, []
         )
 
-    def fake_layout(ctx, scanned_pages, page_count, source_image_count):
-        calls.append("layout")
-        return ConversionResult(
-            tmp_path / "layout.docx", "layout.docx", pdf_to_docx.DOCX_MIME, []
-        )
-
     monkeypatch.setattr(pdf_to_docx, "_convert_image_only", fake_images)
-    monkeypatch.setattr(pdf_to_docx, "_convert_layout_mode", fake_layout)
 
-    result = pdf_to_docx.convert(_context(tmp_path, _form_pdf()))
+    document = fitz.open()
+    document.new_page()
+    data = document.tobytes()
+    document.close()
+
+    result = pdf_to_docx.convert(_context(tmp_path, data))
 
     assert calls == ["images"]
-    assert any("gambar 300 DPI" in warning for warning in result.warnings)
-    assert not any("layout" in warning.lower() for warning in result.warnings)
+    assert any(
+        "tidak dapat diedit" in warning and "OCR" in warning
+        for warning in result.warnings
+    )
 
 
 def test_auto_mode_keeps_simple_text_editable(tmp_path, monkeypatch):

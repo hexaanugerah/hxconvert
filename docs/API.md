@@ -354,17 +354,17 @@ Kemungkinan error: `413`, `415`, `422` (opsi/JSON atau jumlah berkas), `429`.
 
 | `mode` | Perilaku |
 |---|---|
-| `auto` (default) | Klasifikasi per halaman: halaman pindai jadi gambar, halaman teks jadi teks edit, halaman campuran memakai `pdf2docx`. Dokumen desain/slide (teks menyatu dengan gambar atau bidang warna, mis. ekspor Canva/Figma) otomatis dirender sebagai gambar penuh agar tampilannya sama persis dengan PDF. |
+| `auto` (default) | Klasifikasi per halaman: halaman pindai (tanpa lapisan teks) jadi gambar, halaman teks jadi teks edit, halaman campuran/desain memakai `pdf2docx`. Dokumen desain/slide (teks menyatu dengan gambar atau bidang warna, mis. ekspor Canva/Figma) memakai mesin tata letak: gambar dan posisi asli dipertahankan, tetapi teksnya tetap berupa teks Word yang dapat diedit. Halaman tanpa lapisan teks tetap menjadi gambar karena tidak ada teks untuk diekstrak. |
 | `fast` | Setiap halaman dirender sebagai **JPEG** pada `fast_dpi` (default 72) tanpa analisis tata letak. Paling cepat untuk batch besar: terukur 4,5 detik untuk 20 PDF 12 halaman berfoto, dibanding 26,8 detik pada mode `auto`. Teks tidak dapat diedit dan hasilnya sekualitas pratinjau layar; naikkan `fast_dpi` (72–200) bila perlu lebih tajam. |
 | `layout` | Memakai `pdf2docx`: ukuran halaman, posisi teks, tabel, gambar raster, dan grafik vektor dipertahankan. Gambar JPEG2000/CMYK dinormalisasi. Teks tetap dapat diedit, tetapi posisinya berada dalam kotak mengambang. |
 | `editable` | Alur Word sebaris (heading, paragraf, tabel asli, gambar sebaris, section per ukuran halaman). Lebih mudah diedit, posisi visual tidak persis. |
 | `full-image` | "Seperti foto": setiap halaman dirender sebagai PNG 300 DPI. Paling setia secara visual, tanpa OCR; teks tidak dapat diedit. |
 
-Jika mode `layout` diminta untuk PDF yang seluruhnya hasil pindai, backend otomatis memakai mode edit + OCR (bila OCR tersedia) dan mengirim peringatan. Peringatan pada `warnings` selalu menyebut gambar, font, atau halaman yang tidak dapat dipertahankan persis; tidak ada kehilangan yang disembunyikan.
+Halaman hasil pindai dipertahankan secara visual oleh mode `layout` dan tidak menjadi teks; gunakan alat `pdf-ocr-to-word` untuk mendapatkan teks yang dapat diedit. Bila mesin OCR tidak terpasang, `warnings` menyebutkannya. Peringatan pada `warnings` selalu menyebut gambar, font, atau halaman yang tidak dapat dipertahankan persis; tidak ada kehilangan yang disembunyikan.
 
 Mode `editable` juga memakai jenis huruf asli PDF: setiap run diberi nama keluarga font dari PDF (bila font itu dapat disematkan) dan font tersebut disematkan ke DOCX, sehingga tipografi tetap sama di komputer yang tidak memiliki font tersebut. Run yang fontnya tidak dapat disematkan memakai font bawaan Word, dan hal itu dilaporkan di `warnings`.
 
-Di antarmuka web, alat `pdf-to-word` sekarang **hanya memakai `auto`** dan tidak menampilkan pemilih mode. Opsi `mode`, `fast_dpi`, `ocr`, `language`, `page_breaks`, dan `tables` tetap diterima API untuk pemanggil lanjutan, tetapi disembunyikan dari UI agar pengguna cukup mengunggah PDF lalu mengonversi. Hasil `auto` bersifat editable untuk PDF berteks, dan menjadi gambar per halaman hanya bila halaman memang tampak seperti gambar (scan/foto/desain).
+Di antarmuka web, alat `pdf-to-word` sekarang **hanya memakai `auto`** dan tidak menampilkan pemilih mode. Opsi `mode`, `fast_dpi`, `ocr`, `language`, `page_breaks`, dan `tables` tetap diterima API untuk pemanggil lanjutan, tetapi disembunyikan dari UI agar pengguna cukup mengunggah PDF lalu mengonversi. Hasil `auto` bersifat editable untuk PDF berteks, dan menjadi gambar per halaman hanya bila halaman tidak memiliki lapisan teks sama sekali (scan/foto).
 
 Trade-off kecepatan, ketajaman, dan ukuran hasil (diukur dengan `backend/benchmark_large_batch.py` pada mesin 8 core, PDF 12 halaman berfoto 1,7 MB; satu pekerjaan dibatasi 50 berkas):
 

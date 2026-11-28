@@ -975,7 +975,20 @@ export function PdfEditor() {
       if (!response.ok) throw new Error("Gagal mengambil PDF hasil edit dari server.");
       const blob = await response.blob();
       const file = new File([blob], "edited.pdf", { type: "application/pdf" });
-      return createConversion({ tool: "pdf-to-word", files: [file], options: {} });
+      // This button exists so the document can be edited outside the app. A
+      // scan has no text layer, so automatic mode would hand back a Word file
+      // made of page pictures, which is exactly what cannot be edited in Word.
+      // When OCR is available, extract the text instead.
+      const scanOnly =
+        pages.length > 0 && pages.every((page) => page.texts.length === 0);
+      return createConversion({
+        tool: "pdf-to-word",
+        files: [file],
+        options:
+          scanOnly && ocrAvailable
+            ? { mode: "editable", ocr: "always", language: ocrLanguage }
+            : {},
+      });
     },
     onSuccess: (created) => {
       setWordJobId(created.id);
@@ -2730,6 +2743,26 @@ export function PdfEditor() {
                       <p className="text-xs text-destructive">
                         Versi Word gagal dibuat: {wordJob.error_message}
                       </p>
+                    )}
+                    {wordJob?.status === "completed" && wordJob.warnings.length > 0 && (
+                      <div className="rounded-lg border bg-muted/30 p-2.5 text-xs">
+                        <p className="mb-1 font-medium">Catatan versi Word</p>
+                        <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
+                          {wordJob.warnings.map((warning, index) => (
+                            <li key={index}>{warning}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {job.warnings.length > 0 && (
+                      <div className="rounded-lg border bg-muted/30 p-2.5 text-xs">
+                        <p className="mb-1 font-medium">Catatan hasil edit</p>
+                        <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
+                          {job.warnings.map((warning, index) => (
+                            <li key={index}>{warning}</li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                   </div>
                 )}

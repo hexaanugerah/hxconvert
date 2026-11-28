@@ -5,11 +5,14 @@ from difflib import SequenceMatcher
 from io import BytesIO
 import json
 from pathlib import Path
+import re
 from urllib.parse import quote
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import Response
 
@@ -39,7 +42,42 @@ async def _read_docx(upload: UploadFile) -> tuple[bytes, str]:
     return data, Path(upload.filename or "dokumen.docx").name
 
 
+PROTECTION_TAGS = ("w:documentProtection", "w:writeProtection")
+
+
+def _remove_editing_protection(document) -> bool:
+    """Drop Word's read-only / restrict-editing settings from the saved copy.
+
+    A form DOCX often carries ``w:documentProtection`` (restrict editing) or
+    ``w:writeProtection`` (password to modify). python-docx round-trips both, so
+    the edited file would still open read-only in Word even though the user has
+    just edited it here. The download is a new copy that is meant to be edited
+    further, so those settings are removed.
+    """
+    settings = document.settings.element
+    changed = False
+    for tag in PROTECTION_TAGS:
+        for node in settings.findall(qn(tag)):
+            settings.remove(node)
+            changed = True
+    return changed
+
+
+def _is_encrypted_docx(data: bytes) -> bool:
+    """True for an OOXML file saved with a password (an OLE compound file)."""
+    if not data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return False
+    # Encrypted OOXML packets expose this stream name as UTF-16LE. Legacy
+    # binary .doc files use the same container but carry "WordDocument".
+    return "EncryptedPackage".encode("utf-16-le") in data
+
+
 def _open_docx(data: bytes):
+    if _is_encrypted_docx(data):
+        raise ValidationAppError(
+            "Dokumen Word ini dilindungi kata sandi. Buka proteksinya di Word "
+            "(File > Info > Protect Document) lalu unggah ulang berkasnya."
+        )
     try:
         return Document(BytesIO(data))
     except Exception as exc:
@@ -79,8 +117,24 @@ def _replacement_run_indexes(old_text: str, new_text: str, run_ranges: list[tupl
     return assignments
 
 
+def _text_runs(paragraph: Paragraph) -> list[Run]:
+    """Runs that make up ``Paragraph.text``, including runs inside hyperlinks.
+
+    python-docx exposes hyperlink text through ``Paragraph.text`` but not through
+    ``Paragraph.runs``. Editing with only the direct runs therefore leaves the
+    hyperlink text untouched and duplicates it in the saved document.
+    """
+    runs: list[Run] = []
+    for child in paragraph._p:
+        if child.tag == qn("w:r"):
+            runs.append(Run(child, paragraph))
+        elif child.tag == qn("w:hyperlink"):
+            runs.extend(Run(run, paragraph) for run in child.iter(qn("w:r")))
+    return runs
+
+
 def _set_paragraph_text(paragraph: Paragraph, text: str) -> None:
-    runs = paragraph.runs
+    runs = _text_runs(paragraph)
     if not runs:
         paragraph.add_run(text)
         return
@@ -95,9 +149,63 @@ def _set_paragraph_text(paragraph: Paragraph, text: str) -> None:
         ranges.append((start, cursor))
     assignments = _replacement_run_indexes(old_text, text, ranges)
     if not old_text:
-        assignments[0] = text
+        # The paragraph holds pictures, tabs, or other non-text objects but no
+        # editable text. Add the new text in its own run; writing through
+        # Run.text would delete those objects.
+        paragraph.add_run(text)
+        return
     for run, replacement in zip(runs, assignments):
-        run.text = replacement
+        if not _replace_run_text(run, replacement):
+            # This run has no text/tab/break children (for example it only
+            # holds an inline picture). Leave it untouched so the picture
+            # survives the edit.
+            if replacement:
+                paragraph.add_run(replacement)
+
+
+# Text-like run children. Run.text expands tabs/breaks to "\t"/"\n", so they
+# must be rebuilt as real OOXML elements instead of literal characters.
+_TEXT_RUN_TAGS = frozenset(
+    {
+        qn("w:t"),
+        qn("w:tab"),
+        qn("w:br"),
+        qn("w:cr"),
+        qn("w:noBreakHyphen"),
+        qn("w:ptab"),
+    }
+)
+
+
+def _run_text_elements(text: str) -> list:
+    elements = []
+    for chunk in re.split(r"(\t|\r\n|\r|\n)", text):
+        if chunk == "\t":
+            elements.append(OxmlElement("w:tab"))
+        elif chunk in ("\r\n", "\r", "\n"):
+            elements.append(OxmlElement("w:br"))
+        elif chunk:
+            node = OxmlElement("w:t")
+            node.text = chunk
+            node.set(qn("xml:space"), "preserve")
+            elements.append(node)
+    return elements
+
+
+def _replace_run_text(run, text: str) -> bool:
+    """Replace a run's text while keeping drawings, fields, and breaks intact."""
+    element = run._r
+    children = list(element)
+    textual = [child for child in children if child.tag in _TEXT_RUN_TAGS]
+    if not textual:
+        return False
+    position = children.index(textual[0])
+    for child in textual:
+        element.remove(child)
+    for child in _run_text_elements(text):
+        element.insert(position, child)
+        position += 1
+    return True
 
 
 @router.post("/inspect", dependencies=[Depends(enforce_rate_limit)])
@@ -159,6 +267,8 @@ async def save_word_document(
         _set_paragraph_text(paragraphs[index], text)
     for text in raw_additions:
         document.add_paragraph(text)
+
+    _remove_editing_protection(document)
 
     output = BytesIO()
     document.save(output)

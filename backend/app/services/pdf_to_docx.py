@@ -500,50 +500,15 @@ def _convert_auto_mode(
 ) -> ConversionResult:
     """Smart per-page conversion:
 
-    - design/slide pages -> full-page images (the text is part of the artwork)
-    - image-only pages -> full-page images
+    - image-only pages (no text layer) -> full-page images
     - text-only pages -> editable text extraction
-    - mixed/vector pages -> layout preservation via pdf2docx
+    - design/slide, mixed or vector pages -> layout preservation via pdf2docx
+
+    A page is only turned into a picture when it has no text layer at all. Design
+    pages (labels drawn over artwork) used to be rasterised whole, which made
+    the resulting Word file impossible to type into; the layout engine keeps the
+    artwork and the text positions while the text itself stays editable.
     """
-    design_pages = [info for info in page_analysis if info.design_page]
-    visual_count = len(
-        {
-            info.index
-            for info in page_analysis
-            if info.design_page or info.cls == "image-only"
-        }
-    )
-    if design_pages and visual_count >= math.ceil(page_count * 0.75):
-        pages_info = [
-            (info.index + 1, info.width, info.height) for info in page_analysis
-        ]
-        result = _convert_image_only(ctx, doc, pages_info, page_count)
-        result.warnings.insert(
-            0,
-            "PDF ini berisi halaman desain/visual: teks menyatu dengan gambar dan "
-            "bidang warna. Mode Otomatis merender setiap halaman sebagai gambar agar "
-            "tampilan sama persis seperti PDF; teks tidak dapat diedit. Gunakan alat "
-            "'PDF Pindai ke Word (OCR)' bila teks perlu diedit.",
-        )
-        return result
-
-    # Vector grids in complex forms move when Word or LibreOffice substitutes
-    # fonts or rounds table measurements. Rasterize Auto-mode forms losslessly
-    # so their text, rules, and shapes remain in the source PDF positions.
-    complex_pages = [info.index + 1 for info in page_analysis if info.complex_table]
-    if complex_pages:
-        pages_info = [
-            (info.index + 1, info.width, info.height) for info in page_analysis
-        ]
-        result = _convert_image_only(ctx, doc, pages_info, page_count)
-        result.warnings.insert(
-            0,
-            "PDF ini berisi tabel atau form dengan garis dan posisi rapat. Mode Otomatis "
-            "menyimpan halaman sebagai gambar 300 DPI agar teks, tabel, dan bentuk "
-            "tetap sesuai PDF asli. Teks dalam file Word hasil konversi tidak dapat diedit.",
-        )
-        return result
-
     # Mixed document with scanned pages: layout mode preserves everything visually.
     if "image-only" in page_classes and (
         "text-only" in page_classes or "mixed" in page_classes or "vector" in page_classes
@@ -555,6 +520,7 @@ def _convert_auto_mode(
             ctx, scanned_pages, page_count, source_image_count
         )
         _warn_complex_tables(result, page_analysis)
+        _warn_design_pages(result, page_analysis)
         return result
 
     # All pages are image-only: reuse the already analysed document, don't re-read it.
@@ -562,7 +528,14 @@ def _convert_auto_mode(
         pages_info = [
             (index + 1, info.width, info.height) for index, info in enumerate(page_analysis)
         ]
-        return _convert_image_only(ctx, doc, pages_info, page_count)
+        result = _convert_image_only(ctx, doc, pages_info, page_count)
+        result.warnings.insert(
+            0,
+            "PDF ini tampak hasil pindai: setiap halaman disimpan sebagai gambar agar "
+            "tampil sama seperti aslinya, sehingga teks tidak dapat diedit di Word. "
+            + _ocr_advice(),
+        )
+        return result
 
     # All pages are text-only.
     if all(cls == "text-only" for cls in page_classes):
@@ -578,7 +551,37 @@ def _convert_auto_mode(
     ]
     result = _convert_layout_mode(ctx, scanned_pages, page_count, source_image_count)
     _warn_complex_tables(result, page_analysis)
+    _warn_design_pages(result, page_analysis)
     return result
+
+
+def _warn_design_pages(
+    result: ConversionResult, page_analysis: list[PageInfo]
+) -> None:
+    """Explain how pages whose text sits on artwork are converted."""
+    design_pages = [info.index + 1 for info in page_analysis if info.design_page]
+    if not design_pages:
+        return
+    result.warnings.insert(
+        0,
+        "Halaman "
+        + ", ".join(str(page) for page in design_pages[:15])
+        + ("…" if len(design_pages) > 15 else "")
+        + " berisi desain/visual (teks di atas gambar atau bidang warna). Mode "
+        "Otomatis memakai mesin tata letak: gambar dan posisi asli dipertahankan, "
+        "tetapi teksnya tetap berupa teks Word yang bisa Anda ubah.",
+    )
+
+
+def _ocr_advice() -> str:
+    """Tell the user how to make scanned text editable, or why they cannot."""
+    if ocr_available():
+        return "Gunakan alat 'PDF Pindai ke Word (OCR)' bila teks perlu diedit."
+    return (
+        "Mesin OCR belum dipasang di server ini, jadi teks hasil pindai belum dapat "
+        "diubah menjadi teks Word. Pasang Tesseract OCR atau rapidocr-onnxruntime "
+        "agar alat OCR tersedia."
+    )
 
 
 def _warn_complex_tables(
@@ -1382,7 +1385,8 @@ def _convert_layout_mode(
             + ", ".join(str(page) for page in scanned_pages[:15])
             + ("…" if len(scanned_pages) > 15 else "")
             + " tidak memiliki lapisan teks yang memadai. Halaman tersebut dipertahankan "
-            "secara visual; gunakan alat 'PDF Pindai ke Word (OCR)' agar teksnya dapat diedit."
+            "secara visual; "
+            + _ocr_advice()
         )
     if source_image_count and not media:
         warnings.append(
@@ -1391,8 +1395,8 @@ def _convert_layout_mode(
         )
     if len(scanned_pages) == page_count:
         warnings.append(
-            "Seluruh dokumen tampak hasil pindai. Untuk Word yang dapat diedit sepenuhnya, "
-            "gunakan alat 'PDF Pindai ke Word (OCR)'."
+            "Seluruh dokumen tampak hasil pindai. Untuk Word yang dapat diedit "
+            "sepenuhnya, " + _ocr_advice()
         )
     return ConversionResult(
         output,

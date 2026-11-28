@@ -23,7 +23,7 @@ from app.core.config import settings
 
 # Bump this when any conversion engine behaviour changes (handlers, mode
 # defaults, library behaviour changes) so stale results are never returned.
-ENGINE_VERSION = "2026-11-25.2"
+ENGINE_VERSION = "2026-11-28.1"
 
 
 def cache_root() -> Path:
